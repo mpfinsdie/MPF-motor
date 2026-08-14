@@ -40,7 +40,7 @@
 | 項目 | 規格 |
 |------|------|
 | DAQ 裝置 | Advantech USB-4716 |
-| Driver | DAQNavi（已安裝） |
+| Driver | DAQNavi（需另行下載安裝，詳見下方） |
 | Hall Sensor | 3.3V 數位輸出，三相 (U/V/W) |
 | Encoder | 5V 數位輸出，A/B 正交訊號 |
 
@@ -62,7 +62,29 @@
 ## 軟體需求
 
 - Python 3.8+
-- Advantech DAQNavi SDK（已安裝）
+- Advantech DAQNavi SDK（需另行下載安裝）
+
+---
+
+## Driver 下載
+
+使用本系統前，請先至 Advantech 官網下載並安裝 **DAQNavi Driver**：
+
+| 項目 | 說明 |
+|------|------|
+| 下載頁面 | [Advantech DAQNavi Driver 下載](https://www.advantech.com/zh-tw/support/details/driver?id=1-1YPCECD) |
+| 適用裝置 | USB-4716 及其他 Advantech DAQ 系列 |
+| 安裝後路徑 | `C:\Program Files (x86)\Advantech\DAQNavi\` |
+
+### 安裝步驟
+
+1. 前往下載頁面：
+   👉 https://www.advantech.com/zh-tw/support/details/driver?id=1-1YPCECD
+2. 選擇對應作業系統版本（Windows）並下載安裝包
+3. 執行安裝程式，依指示完成安裝
+4. 安裝完成後，插入 USB-4716，確認裝置管理員中可正常識別
+
+> ⚠️ **注意**：安裝 DAQNavi 後需重新啟動電腦，才能確保 Driver 正確載入。
 
 ---
 
