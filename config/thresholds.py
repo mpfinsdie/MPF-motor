@@ -3,6 +3,9 @@
 Hall Sensor (3.3V 系統) 與 Encoder (5V 系統) 的判斷閾值
 """
 
+import os
+from pathlib import Path
+
 # Hall Sensor 閾值設定（3.3V 系統）
 HALL_THRESHOLDS = {
     "system_voltage": 3.3,
@@ -48,4 +51,14 @@ SAMPLING = {
     "di_poll_interval": 0.0001, # DI 輪詢間隔 (秒) = 10 kHz
     "display_update_ms": 100,   # GUI 更新間隔 (ms)
     "buffer_size": 1000,        # 波形顯示緩衝點數
+}
+
+# 資料庫設定
+_DEFAULT_DB_DIR = str(Path(__file__).parent.parent / "data")
+DATABASE = {
+    "db_path": str(Path(_DEFAULT_DB_DIR) / "motor_test.db"),
+    # 整體 PASS 門檻（Hall 與 Encoder 成功率都需 >= 此值）
+    "pass_threshold": 0.95,
+    # 預設測試時長（秒）
+    "default_duration_s": 300,
 }

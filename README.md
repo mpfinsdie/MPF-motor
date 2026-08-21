@@ -28,10 +28,25 @@
 - Encoder A/B 電壓波形 + 數位訊號波形
 - 即時 PASS/FAIL 結果顯示
 - 電壓閾值與 Encoder PPR 可即時調整
+- **倒數計時列**：顯示剩餘時間與進度條（檢測中）
+- **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
+
+### 測試場次管理（v1.1 新增）
+- 連線後**立即開始監控**，操作員觀察訊號穩定後再手動觸發檢測
+- 每次檢測前可輸入**馬達序號**與操作員名稱
+- 預設 **5 分鐘**計時，可調整（1~60 分鐘），支援提前停止
+- 結果**自動儲存至 SQLite 資料庫**，不需手動操作
+- 只記錄統計摘要（成功率、不合格率、RPM），不保留全部原始數據
+
+### 資料庫與歷史查詢（v1.1 新增）
+- SQLite 資料庫，預設路徑 `data/motor_test.db`，可在 UI 中變更
+- 歷史查詢視窗：表格顯示所有場次，支援序號篩選、匯出 CSV、刪除記錄
+- 全域統計摘要：總場次數、整體 PASS 率、平均成功率
 
 ### 報表輸出
-- Excel (.xlsx) 格式：含摘要、Hall、Encoder 三個工作表
-- CSV 格式：Hall 與 Encoder 各一個檔案
+- Excel (.xlsx) 格式：含摘要、Hall、Encoder 三個工作表（手動匯出）
+- CSV 格式：Hall 與 Encoder 各一個檔案（手動匯出）
+- 歷史記錄 CSV 匯出（從歷史查詢視窗）
 
 ---
 
@@ -135,18 +150,51 @@ python main.py
 
 ## 操作說明
 
-1. **啟動程式** → 自動嘗試連線 USB-4716
-2. **調整設定**（右側面板）：
-   - Encoder PPR：依實際 Encoder 規格設定（預設 1000 PPR）
-   - Hall/Encoder 電壓閾值：可即時調整
-3. **點擊「▶ 開始量測」** → 開始即時波形顯示與分析
-4. **觀察結果面板**：
-   - 綠色 PASS / 紅色 FAIL 即時顯示
-   - 電壓值、準位、DI 狀態、一致性
-   - Encoder 計數、方向、RPM、位置
-5. **點擊「↺ 重置計數」** → 重置 Encoder 計數器
-6. **點擊「■ 停止」** → 停止量測
-7. **點擊「💾 匯出報表」** → 選擇 Excel 或 CSV 格式儲存
+### 標準測試流程
+
+```
+啟動程式
+  ↓
+自動連線 USB-4716（連線成功後立即開始監控）
+  ↓
+觀察即時波形，確認訊號穩定
+  ↓
+點擊「▶ 開始檢測」→ 輸入馬達序號（可留空）、操作員、測試時長
+  ↓
+倒數計時（預設 5 分鐘）
+  ├─ 時間到 → 自動停止並儲存
+  └─ 點擊「⏹ 提前停止」→ 手動停止並儲存
+  ↓
+顯示結果摘要（Hall/Encoder 成功率、整體 PASS/FAIL）
+  ↓
+回到監控模式（繼續讀取，可進行下一次檢測）
+```
+
+### 按鈕說明
+
+| 按鈕 | 說明 |
+|------|------|
+| **▶ 開始檢測** | 開啟場次設定對話框，輸入序號後開始計時 |
+| **⏹ 提前停止** | 提前結束檢測並儲存目前統計結果 |
+| **↺ 重置計數** | 重置 Encoder 計數器 |
+| **💾 匯出報表** | 匯出最近一次場次的原始數據（Excel/CSV） |
+| **📋 歷史記錄** | 開啟歷史查詢視窗，查看所有場次統計 |
+| **🗄 DB 路徑** | 變更 SQLite 資料庫儲存路徑 |
+| **🔌 重新連線** | 重新連線 USB-4716 |
+
+### 設定面板（右側）
+
+- **Encoder PPR**：依實際 Encoder 規格設定（預設 1000 PPR）
+- **Hall VH_min / VL_max**：Hall Sensor 電壓閾值（可即時調整）
+- **Encoder VH_min / VL_max**：Encoder 電壓閾值（可即時調整）
+
+### 歷史查詢視窗
+
+1. 點擊「📋 歷史記錄」開啟
+2. 可依序號關鍵字篩選
+3. 點選任一列查看詳細資訊
+4. 「💾 匯出 CSV」匯出目前顯示的所有記錄
+5. 「🗑 刪除選取」刪除選取的場次記錄
 
 ---
 
@@ -160,9 +208,12 @@ MPF-motor/
 ├── Automation.py                  # DAQNavi wrapper（需手動複製）
 ├── bdaqctrl.py                    # DAQNavi wrapper（需手動複製）
 │
+├── data/                          # 資料庫儲存目錄（自動建立）
+│   └── motor_test.db              # SQLite 測試記錄資料庫
+│
 ├── config/
 │   ├── __init__.py
-│   └── thresholds.py              # 電壓閾值與取樣設定
+│   └── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑
 │
 ├── daq/
 │   ├── __init__.py
@@ -170,16 +221,23 @@ MPF-motor/
 │   ├── ai_reader.py               # 類比輸入讀取（電壓量測）
 │   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 計數）
 │
+├── db/                            # 資料庫模組（v1.1 新增）
+│   ├── __init__.py
+│   └── database.py                # SQLite CRUD 封裝（DatabaseManager）
+│
 ├── logic/
 │   ├── __init__.py
 │   ├── hall_analyzer.py           # Hall Sensor 分析邏輯
-│   └── encoder_analyzer.py        # Encoder 分析邏輯
+│   ├── encoder_analyzer.py        # Encoder 分析邏輯
+│   └── test_session.py            # 測試場次管理 + 統計計算（v1.1 新增）
 │
 ├── ui/
 │   ├── __init__.py
-│   ├── main_window.py             # PyQt5 主視窗
+│   ├── main_window.py             # PyQt5 主視窗（v1.1 重構）
 │   ├── waveform_widget.py         # pyqtgraph 即時波形元件
-│   └── result_panel.py            # 測試結果顯示面板
+│   ├── result_panel.py            # 測試結果顯示面板
+│   ├── session_dialog.py          # 場次啟動對話框（v1.1 新增）
+│   └── history_viewer.py          # 歷史查詢視窗（v1.1 新增）
 │
 └── report/
     ├── __init__.py
@@ -243,8 +301,47 @@ USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數。
 
 ---
 
+## 資料庫結構
+
+SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
+
+### `test_sessions`（測試場次）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| id | INTEGER | 自動遞增主鍵 |
+| serial_no | TEXT | 馬達序號（可空白） |
+| operator | TEXT | 操作員名稱（可空白） |
+| started_at | TEXT | 開始時間（ISO 8601） |
+| ended_at | TEXT | 結束時間 |
+| duration_s | REAL | 實際測試秒數 |
+| notes | TEXT | 備註 |
+
+### `test_results`（統計結果）
+
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| session_id | INTEGER | 對應場次 ID |
+| hall_total | INTEGER | Hall 總採樣次數 |
+| hall_pass | INTEGER | Hall PASS 次數 |
+| hall_fail | INTEGER | Hall FAIL 次數 |
+| hall_pass_rate | REAL | Hall 成功率（0.0~1.0） |
+| enc_total | INTEGER | Encoder 總採樣次數 |
+| enc_pass | INTEGER | Encoder PASS 次數 |
+| enc_fail | INTEGER | Encoder FAIL 次數 |
+| enc_pass_rate | REAL | Encoder 成功率（0.0~1.0） |
+| avg_rpm | REAL | 平均轉速（RPM） |
+| max_rpm | REAL | 最高轉速（RPM） |
+| min_rpm | REAL | 最低轉速（RPM） |
+| overall_pass | INTEGER | 整體判定（1=PASS, 0=FAIL） |
+
+> **整體 PASS 條件**：Hall 成功率 ≥ 95% **且** Encoder 成功率 ≥ 95%
+
+---
+
 ## 版本記錄
 
 | 版本 | 日期 | 說明 |
 |------|------|------|
 | 1.0.0 | 2026-08-14 | 初始版本 |
+| 1.1.0 | 2026-08-21 | 新增測試場次管理、SQLite 資料庫、歷史查詢視窗；流程改為連線後立即監控，手動觸發 5 分鐘計時檢測 |
