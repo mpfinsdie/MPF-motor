@@ -8,13 +8,13 @@
 ## 功能特色
 
 ### Hall Sensor (3.3V 系統)
-- AI 通道量測三相 (U/V/W) 電壓準位
+- AI 通道量測三相 (U/V/W) 電壓準位（WaveformAI 硬體串流，10,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - AI 與 DI 一致性驗證
 - 電壓閾值判斷：H > 2.0V，L < 0.8V（可調整）
 
 ### Encoder (5V 系統)
-- AI 通道量測 A/B 相電壓準位
+- AI 通道量測 A/B 相電壓準位（WaveformAI 硬體串流，10,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - 電壓閾值判斷：H > 3.5V，L < 1.5V（可調整）
 - 軟體正交解碼（A/B 相位差 90°）
@@ -23,7 +23,7 @@
 - 角度位置計算（度）
 
 ### GUI 介面
-- PyQt5 + pyqtgraph 即時波形顯示
+- PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形 + 數位訊號波形
 - 即時 PASS/FAIL 結果顯示
@@ -61,14 +61,14 @@
 
 ### 接線規劃
 
-| 訊號 | AI 通道 | DI 通道 | 電壓系統 |
-|------|---------|---------|----------|
-| Hall U | AI Ch0 | DI0 | 3.3V |
-| Hall V | AI Ch1 | DI1 | 3.3V |
-| Hall W | AI Ch2 | DI2 | 3.3V |
-| Encoder A | AI Ch3 | DI3 | 5V |
-| Encoder B | AI Ch4 | DI4 | 5V |
-| GND | AGND | DGND | 共地 |
+| 訊號 | AI 通道 | DI 通道 | 電壓系統 | AI 量程 |
+|------|---------|---------|----------|---------|
+| Hall U | AI Ch0 | DI0 | 3.3V | 0~5V |
+| Hall V | AI Ch1 | DI1 | 3.3V | 0~5V |
+| Hall W | AI Ch2 | DI2 | 3.3V | 0~5V |
+| Encoder A | AI Ch3 | DI3 | 5V | 0~10V |
+| Encoder B | AI Ch4 | DI4 | 5V | 0~10V |
+| GND | AGND | DGND | 共地 | — |
 
 > ⚠️ **注意**：USB-4716 DI 為 TTL 相容（VIH max = 5.5V），5V 訊號可直接接入。
 
@@ -105,13 +105,26 @@
 
 ## 安裝步驟
 
-### Step 1：複製 DAQNavi Python Wrapper
+### Step 1：複製 DAQNavi Python SDK
 
-從 DAQNavi 安裝目錄複製以下兩個檔案到專案根目錄：
+從 DAQNavi 安裝目錄複製整個 `Automation` 資料夾到專案根目錄：
+
+```powershell
+Copy-Item -Path "C:\Advantech\DAQNavi\Examples\Python\Automation" `
+          -Destination "C:\Users\830010\Documents\MPF\MPF-motor\Automation" -Recurse
+```
+
+複製後目錄結構應如下：
 
 ```
-C:\Program Files (x86)\Advantech\DAQNavi\Examples\Python\Automation.py
-C:\Program Files (x86)\Advantech\DAQNavi\Examples\Python\bdaqctrl.py
+MPF-motor/
+└── Automation/
+    ├── __init__.py
+    └── BDaq/
+        ├── __init__.py
+        ├── WaveformAiCtrl.py   ← AI 高速串流（本系統使用）
+        ├── InstantDiCtrl.py    ← DI 即時讀取（本系統使用）
+        └── ...
 ```
 
 ### Step 2：建立 Python 虛擬環境
@@ -144,7 +157,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-> 💡 **模擬模式**：若未安裝 DAQNavi SDK 或未連接硬體，程式會自動進入模擬模式，使用模擬訊號進行測試。
+> 💡 **模擬模式**：若未安裝 DAQNavi SDK 或未連接硬體，程式會自動進入模擬模式，使用模擬訊號進行測試（~100 Hz 輪詢）。
 
 ---
 
@@ -205,8 +218,12 @@ MPF-motor/
 ├── main.py                        # 程式進入點
 ├── requirements.txt               # Python 相依套件
 ├── README.md                      # 本文件
-├── Automation.py                  # DAQNavi wrapper（需手動複製）
-├── bdaqctrl.py                    # DAQNavi wrapper（需手動複製）
+│
+├── Automation/                    # DAQNavi Python SDK（需手動複製）
+│   └── BDaq/
+│       ├── WaveformAiCtrl.py      # AI 高速串流控制器（本系統使用）
+│       ├── InstantDiCtrl.py       # DI 即時讀取控制器（本系統使用）
+│       └── ...
 │
 ├── data/                          # 資料庫儲存目錄（自動建立）
 │   └── motor_test.db              # SQLite 測試記錄資料庫
@@ -217,9 +234,9 @@ MPF-motor/
 │
 ├── daq/
 │   ├── __init__.py
-│   ├── daq_controller.py          # USB-4716 裝置控制器
-│   ├── ai_reader.py               # 類比輸入讀取（電壓量測）
-│   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 計數）
+│   ├── daq_controller.py          # USB-4716 裝置控制器（WaveformAI + InstantDI）
+│   ├── ai_reader.py               # 類比輸入讀取（WaveformAI 事件驅動，10 kHz）
+│   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 軟體計數）
 │
 ├── db/                            # 資料庫模組（v1.1 新增）
 │   ├── __init__.py
@@ -243,6 +260,47 @@ MPF-motor/
     ├── __init__.py
     └── report_generator.py        # CSV/Excel 報表生成
 ```
+
+---
+
+## AI 取樣架構（v1.2 改造）
+
+### WaveformAiCtrl 硬體串流模式
+
+v1.2 起 AI 讀取改用 `WaveformAiCtrl` 硬體緩衝串流，取代原本的 `InstantAiCtrl` 逐通道輪詢：
+
+```
+USB-4716 硬體 ADC
+  │  10,000 Hz/通道（5 通道同步）
+  ↓ DMA
+硬體環形緩衝區（sectionLength=1000 × sectionCount=4）
+  │  每累積 1000 點觸發一次 DataReady 事件（約每 100ms）
+  ↓ EvtBufferedAiDataReady
+Python _on_data_ready() 回呼
+  │  批次取回 5000 個 F64（1000點 × 5通道），解交錯存入 deque
+  ↓
+波形顯示緩衝區（deque，10,000 點 ≈ 1 秒資料）
+```
+
+### 效能對比
+
+| 項目 | v1.1（InstantAI 輪詢） | v1.2（WaveformAI 串流） |
+|------|----------------------|----------------------|
+| AI 取樣架構 | 逐通道 USB 往返 | 硬體 DMA 串流 |
+| 實際 AI 取樣率 | ~40 Hz | **10,000 Hz/通道** |
+| GUI 刷新率 | 10 Hz | **20 Hz** |
+| 波形緩衝點數 | 1,000 點 | **10,000 點（~1 秒）** |
+| AI 通道量程 | 雙極性 ±5V / ±10V | 單極性 0~5V / 0~10V |
+
+### 取樣參數設定（`config/thresholds.py`）
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| `ai_sample_rate` | 10,000 Hz | 每通道取樣率 |
+| `section_length` | 1,000 | 每 section 樣本數（每通道） |
+| `section_count` | 4 | 環形緩衝 section 數 |
+| `display_update_ms` | 50 ms | GUI 刷新間隔（20 Hz） |
+| `buffer_size` | 10,000 | 波形顯示緩衝點數 |
 
 ---
 
@@ -272,7 +330,7 @@ AI 電壓判斷結果必須與 DI 讀取結果一致，否則判定 FAIL。
 
 ## 軟體計數限制
 
-USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數。
+USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數（DI 通道）。
 
 | 參數 | 說明 |
 |------|------|
@@ -280,7 +338,8 @@ USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數。
 | 可靠最高頻率 | ~1~5 kHz（依系統負載） |
 | 建議最高轉速 | 300 RPM @ 1000 PPR |
 
-若需更高轉速量測，建議降低 Encoder PPR 或使用具硬體計數器的 DAQ 模組。
+> 💡 AI 電壓波形已改用 WaveformAI 硬體串流（10 kHz），不受此限制影響。
+> 若需更高轉速量測，建議降低 Encoder PPR 或改用具硬體計數器的 DAQ 模組（如 USB-4751）。
 
 ---
 
@@ -292,12 +351,22 @@ USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數。
 - 嘗試點擊「🔌 重新連線」按鈕
 
 **Q: 程式進入模擬模式**
-- 確認 `Automation.py` 與 `bdaqctrl.py` 已複製到專案根目錄
-- 確認 DAQNavi 安裝路徑正確
+- 確認 `Automation/` 資料夾已複製到專案根目錄
+- 確認 DAQNavi 安裝路徑正確（預設 `C:\Advantech\DAQNavi\`）
+
+**Q: WaveformAI 啟動失敗（錯誤碼 0xXXXX）**
+- 確認 USB-4716 韌體版本支援 WaveformAI（需 DAQNavi 3.x 以上）
+- 確認 `section_length × section_count` 不超過裝置硬體緩衝上限
+- 可嘗試降低 `ai_sample_rate`（如改為 5000）或減少 `section_count`
 
 **Q: Encoder RPM 讀值不穩定**
-- 軟體計數受系統負載影響，屬正常現象
-- 可降低 AI 取樣率（`config/thresholds.py` 中的 `ai_sample_rate`）以減少 CPU 負載
+- DI 軟體計數受系統負載影響，屬正常現象
+- 可降低 `di_poll_interval`（如改為 0.0005）以減少 CPU 負載
+- AI 電壓波形不受影響（已使用硬體串流）
+
+**Q: 波形顯示卡頓**
+- 可增大 `display_update_ms`（如改為 100）降低 GUI 刷新頻率
+- 可減少 `buffer_size`（如改為 5000）降低每次繪圖的資料量
 
 ---
 
@@ -345,3 +414,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 |------|------|------|
 | 1.0.0 | 2026-08-14 | 初始版本 |
 | 1.1.0 | 2026-08-21 | 新增測試場次管理、SQLite 資料庫、歷史查詢視窗；流程改為連線後立即監控，手動觸發 5 分鐘計時檢測 |
+| 1.2.0 | 2026-08-21 | AI 讀取改用 WaveformAiCtrl 硬體串流（10 kHz/通道）；AI 量程改為單極性（Hall 0~5V、Encoder 0~10V）；GUI 刷新率提升至 20 Hz；波形緩衝擴大至 10,000 點 |

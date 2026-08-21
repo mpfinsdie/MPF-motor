@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QLabel, QLineEdit, QPushButton, QHeaderView, QAbstractItemView,
     QGroupBox, QFormLayout, QMessageBox, QFileDialog, QFrame,
-    QSplitter, QTextEdit, QWidget, QSizePolicy
+    QSplitter, QTextEdit, QWidget, QSizePolicy, QDialogButtonBox
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QBrush
@@ -91,6 +91,12 @@ VIEWER_STYLE = """
     }
     QPushButton#btn_export:hover {
         background-color: #3A9A4A;
+    }
+    QPushButton#btn_edit {
+        background-color: #5A5A2D;
+    }
+    QPushButton#btn_edit:hover {
+        background-color: #7A7A3A;
     }
     QPushButton#btn_delete {
         background-color: #7A2D2D;
@@ -266,6 +272,11 @@ class HistoryViewer(QDialog):
         btn_export.setObjectName("btn_export")
         btn_export.clicked.connect(self._on_export_csv)
         h.addWidget(btn_export)
+
+        btn_edit = QPushButton("✏ 編輯資訊")
+        btn_edit.setObjectName("btn_edit")
+        btn_edit.clicked.connect(self._on_edit)
+        h.addWidget(btn_edit)
 
         btn_delete = QPushButton("🗑 刪除選取")
         btn_delete.setObjectName("btn_delete")
@@ -466,6 +477,110 @@ class HistoryViewer(QDialog):
             QMessageBox.information(self, "成功", f"已匯出 {len(self._records)} 筆記錄至：\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "錯誤", f"匯出失敗：\n{e}")
+
+    def _on_edit(self):
+        """編輯選取場次的序號與操作員（允許事後補填）"""
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._records):
+            QMessageBox.information(self, "提示", "請先選取要編輯的記錄")
+            return
+
+        rec = self._records[row]
+        session_id = rec.get("id")
+
+        # 建立編輯對話框
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"編輯場次 #{session_id} 資訊")
+        dlg.setModal(True)
+        dlg.setFixedWidth(380)
+        dlg.setStyleSheet("""
+            QDialog { background-color: #1E1E1E; color: #CCCCCC; }
+            QLabel { color: #CCCCCC; font-size: 12px; }
+            QLineEdit {
+                background-color: #2A2A2A; color: #FFFFFF;
+                border: 1px solid #555555; border-radius: 4px;
+                padding: 5px 8px; font-size: 13px;
+            }
+            QLineEdit:focus { border: 1px solid #4AABFF; }
+            QGroupBox {
+                color: #AAAAAA; border: 1px solid #444444;
+                border-radius: 6px; margin-top: 10px; padding-top: 6px;
+                font-size: 11px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+            QPushButton {
+                background-color: #2D5A8E; color: #FFFFFF; border: none;
+                border-radius: 4px; padding: 7px 20px; font-size: 12px;
+                font-weight: bold; min-width: 80px;
+            }
+            QPushButton:hover { background-color: #3A72B0; }
+            QPushButton#btn_save { background-color: #2D8E2D; }
+            QPushButton#btn_save:hover { background-color: #3AAA3A; }
+        """)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        group = QGroupBox("測試物件資訊")
+        form = QFormLayout(group)
+        form.setSpacing(10)
+        form.setLabelAlignment(0x0002)  # Qt.AlignRight
+
+        serial_edit = QLineEdit(rec.get("serial_no") or "")
+        serial_edit.setPlaceholderText("例：MTR-2026-001")
+        serial_edit.setMaxLength(64)
+        form.addRow("馬達序號：", serial_edit)
+
+        operator_edit = QLineEdit(rec.get("operator") or "")
+        operator_edit.setPlaceholderText("操作員姓名")
+        operator_edit.setMaxLength(32)
+        form.addRow("操作員：", operator_edit)
+
+        layout.addWidget(group)
+
+        btn_layout = QHBoxLayout()
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addStretch()
+        btn_save = QPushButton("💾 儲存")
+        btn_save.setObjectName("btn_save")
+        btn_save.setDefault(True)
+        btn_save.clicked.connect(dlg.accept)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+
+        serial_edit.setFocus()
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        new_serial   = serial_edit.text().strip()
+        new_operator = operator_edit.text().strip()
+
+        try:
+            self._db.update_session_info(
+                session_id=session_id,
+                serial_no=new_serial,
+                operator=new_operator
+            )
+            # 重新載入資料並保持選取列
+            self._load_data()
+            # 嘗試重新選取同一筆（依 ID 找回列號）
+            for r in range(self._table.rowCount()):
+                item = self._table.item(r, 0)
+                if item and item.text() == str(session_id):
+                    self._table.selectRow(r)
+                    break
+            QMessageBox.information(
+                self, "成功",
+                f"場次 #{session_id} 資訊已更新\n"
+                f"序號：{new_serial or '(無)'}\n"
+                f"操作員：{new_operator or '(無)'}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "錯誤", f"更新失敗：\n{e}")
 
     def _on_delete(self):
         """刪除選取的場次記錄"""

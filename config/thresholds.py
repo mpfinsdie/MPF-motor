@@ -39,18 +39,21 @@ ENCODER_THRESHOLDS = {
     "ppr": 1000,        # Pulses Per Revolution（每轉脈波數，依實際 Encoder 規格修改）
 }
 
-# AI 量程設定
+# AI 量程設定（WaveformAiCtrl 通道量程，對應 ValueRange 枚舉）
 AI_RANGE = {
-    "hall": "Bipolar5V",    # ±5V 量程（Hall 3.3V 訊號，精度較高）
-    "encoder": "Bipolar10V", # ±10V 量程（Encoder 5V 訊號）
+    "hall":    "V_0To5",   # 0~5V 單極性（Hall 3.3V 訊號）
+    "encoder": "V_0To10",  # 0~10V 單極性（Encoder 5V 訊號）
 }
 
 # 取樣設定
 SAMPLING = {
-    "ai_sample_rate": 10000,    # AI 取樣率 (Hz)
-    "di_poll_interval": 0.0001, # DI 輪詢間隔 (秒) = 10 kHz
-    "display_update_ms": 100,   # GUI 更新間隔 (ms)
-    "buffer_size": 1000,        # 波形顯示緩衝點數
+    "ai_sample_rate":    10000,  # 每通道取樣率 (Hz)
+    "section_length":    1000,   # WaveformAI 每 section 樣本數（每通道）
+                                 # DataReady 觸發間隔 = section_length / ai_sample_rate = 0.1s
+    "section_count":     4,      # WaveformAI 環形緩衝 section 數（總緩衝 = 4000點/通道）
+    "di_poll_interval":  0.0001, # DI 輪詢間隔 (秒) = 10 kHz
+    "display_update_ms": 50,     # GUI 更新間隔 (ms)，20 Hz 刷新
+    "buffer_size":       10000,  # 波形顯示緩衝點數（約 1 秒資料）
 }
 
 # 資料庫設定

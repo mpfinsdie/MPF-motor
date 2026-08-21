@@ -10,11 +10,16 @@ DAQNavi SDK 結構：
           ├── __init__.py  ← 含 ErrorCode, Scenario, ValueRange 等
           ├── InstantAiCtrl.py
           ├── InstantDiCtrl.py
+          ├── WaveformAiCtrl.py
           └── ...
 
 複製指令（PowerShell）：
   Copy-Item -Path "C:\Advantech\DAQNavi\Examples\Python\Automation" `
             -Destination "<專案根目錄>\Automation" -Recurse
+
+AI 取樣架構（WaveformAiCtrl）：
+  硬體 ADC → DMA → 環形緩衝區 → DataReady 事件 → Python 回呼
+  取樣率：10,000 Hz/通道，每 0.1s 觸發一次 DataReady
 """
 
 import sys
@@ -22,9 +27,10 @@ import os
 
 # 嘗試匯入 DAQNavi SDK（Automation package）
 try:
-    from Automation.BDaq.InstantAiCtrl import InstantAiCtrl
     from Automation.BDaq.InstantDiCtrl import InstantDiCtrl
-    from Automation.BDaq import ErrorCode
+    from Automation.BDaq.WaveformAiCtrl import WaveformAiCtrl
+    from Automation.BDaq import ErrorCode, ValueRange
+    from Automation.BDaq.BDaqApi import BioFailed
     DAQNAVI_AVAILABLE = True
 except ImportError:
     DAQNAVI_AVAILABLE = False
@@ -35,9 +41,9 @@ except ImportError:
 class DAQController:
     """
     Advantech USB-4716 DAQ 裝置控制器
-    管理裝置生命週期與提供 AI/DI 存取介面
+    管理裝置生命週期與提供 WaveformAI / DI 存取介面
 
-    AI 讀取：使用 InstantAiCtrl.readDataF64(chStart, chCount) → (ErrorCode, [float])
+    AI 讀取：使用 WaveformAiCtrl（硬體緩衝串流，10 kHz/通道）
     DI 讀取：使用 InstantDiCtrl.readAny(portStart, portCount) → (ErrorCode, [int])
              使用 InstantDiCtrl.readBit(port, bit) → (ErrorCode, int)
     """
@@ -46,8 +52,8 @@ class DAQController:
 
     def __init__(self, device_description: str = None):
         self.device_description = device_description or self.DEVICE_DESCRIPTION
-        self._ai_ctrl = None
-        self._di_ctrl = None
+        self._wfm_ctrl  = None   # WaveformAiCtrl（高速 AI 串流）
+        self._di_ctrl   = None   # InstantDiCtrl（即時 DI）
         self._connected = False
         self._simulation_mode = not DAQNAVI_AVAILABLE
 
@@ -62,22 +68,24 @@ class DAQController:
     def is_simulation(self) -> bool:
         return self._simulation_mode
 
-    def connect(self) -> bool:
+    def connect(self) -> tuple:
         """
         連線到 USB-4716 裝置
         Returns:
-            bool: 連線成功回傳 True
+            tuple: (success: bool, error_msg: str | None)
+                   success=True 且 error_msg=None  → 真實硬體連線成功
+                   success=False 且 error_msg=str  → 連線失敗，error_msg 為原因
         """
         if self._simulation_mode:
             self._connected = True
             print(f"[模擬模式] 已連線到模擬裝置: {self.device_description}")
-            return True
+            return True, None
 
         try:
-            # 初始化 AI 控制器（即時 AI）
-            self._ai_ctrl = InstantAiCtrl(self.device_description)
-            if self._ai_ctrl is None:
-                raise RuntimeError("無法建立 AI 控制器")
+            # 初始化 WaveformAiCtrl（高速 AI 串流）
+            self._wfm_ctrl = WaveformAiCtrl(self.device_description)
+            if self._wfm_ctrl is None:
+                raise RuntimeError("無法建立 WaveformAiCtrl")
 
             # 初始化 DI 控制器（即時 DI）
             self._di_ctrl = InstantDiCtrl(self.device_description)
@@ -86,12 +94,12 @@ class DAQController:
 
             self._connected = True
             print(f"[DAQ] 已成功連線到裝置: {self.device_description}")
-            return True
+            return True, None
 
         except Exception as e:
-            print(f"[錯誤] 連線失敗: {e}")
+            print(f"[警告] 裝置連線失敗: {e}")
             self._connected = False
-            return False
+            return False, str(e)
 
     def disconnect(self):
         """釋放 DAQ 裝置資源"""
@@ -101,9 +109,13 @@ class DAQController:
             return
 
         try:
-            if self._ai_ctrl:
-                self._ai_ctrl.Dispose()
-                self._ai_ctrl = None
+            if self._wfm_ctrl:
+                try:
+                    self._wfm_ctrl.stop()
+                except Exception:
+                    pass
+                self._wfm_ctrl.dispose()
+                self._wfm_ctrl = None
             if self._di_ctrl:
                 self._di_ctrl.Dispose()
                 self._di_ctrl = None
@@ -112,67 +124,15 @@ class DAQController:
         except Exception as e:
             print(f"[警告] 釋放資源時發生錯誤: {e}")
 
-    def get_ai_ctrl(self):
-        """取得 AI 控制器實例"""
-        return self._ai_ctrl
+    def get_wfm_ai_ctrl(self):
+        """取得 WaveformAiCtrl 實例（供 AIReader 使用）"""
+        return self._wfm_ctrl
 
     def get_di_ctrl(self):
         """取得 DI 控制器實例"""
         return self._di_ctrl
 
-    def read_ai_channel(self, channel: int) -> float:
-        """
-        讀取單一 AI 通道電壓值
-        使用 InstantAiCtrl.readDataF64(chStart, chCount)
-        Args:
-            channel: AI 通道編號 (0~15)
-        Returns:
-            float: 電壓值 (V)
-        """
-        if self._simulation_mode:
-            return self._simulate_ai(channel)
-
-        if not self._connected or self._ai_ctrl is None:
-            raise RuntimeError("裝置未連線")
-
-        ret, data = self._ai_ctrl.readDataF64(channel, 1)
-        if DAQNAVI_AVAILABLE:
-            from Automation.BDaq.BDaqApi import BioFailed
-            if BioFailed(ret):
-                raise RuntimeError(f"AI 讀取失敗，通道 {channel}，錯誤碼: 0x{ret.value:X}")
-        return data[0] if data else 0.0
-
-    def read_ai_channels(self, channels: list) -> list:
-        """
-        批次讀取多個 AI 通道電壓值
-        Args:
-            channels: AI 通道編號列表（需連續）
-        Returns:
-            list: 各通道電壓值列表 (V)
-        """
-        if not channels:
-            return []
-
-        if self._simulation_mode:
-            return [self._simulate_ai(ch) for ch in channels]
-
-        if not self._connected or self._ai_ctrl is None:
-            raise RuntimeError("裝置未連線")
-
-        # 若通道連續，一次讀取效率較高
-        ch_min = min(channels)
-        ch_max = max(channels)
-        if ch_max - ch_min + 1 == len(channels):
-            # 連續通道：一次讀取
-            ret, data = self._ai_ctrl.readDataF64(ch_min, len(channels))
-            if DAQNAVI_AVAILABLE:
-                from Automation.BDaq.BDaqApi import BioFailed
-                if BioFailed(ret):
-                    raise RuntimeError(f"AI 批次讀取失敗，錯誤碼: 0x{ret.value:X}")
-            return list(data)
-        else:
-            # 非連續通道：逐一讀取
-            return [self.read_ai_channel(ch) for ch in channels]
+    # ─── DI 讀取方法（供 DIReader 使用）────────────────────────────────────────
 
     def read_di_port(self, port: int = 0) -> int:
         """
@@ -191,7 +151,6 @@ class DAQController:
 
         ret, data = self._di_ctrl.readAny(port, 1)
         if DAQNAVI_AVAILABLE:
-            from Automation.BDaq.BDaqApi import BioFailed
             if BioFailed(ret):
                 raise RuntimeError(f"DI 讀取失敗，Port {port}，錯誤碼: 0x{ret.value:X}")
         return data[0] if data else 0
@@ -215,7 +174,6 @@ class DAQController:
 
         ret, data = self._di_ctrl.readBit(port, bit)
         if DAQNAVI_AVAILABLE:
-            from Automation.BDaq.BDaqApi import BioFailed
             if BioFailed(ret):
                 raise RuntimeError(f"DI bit 讀取失敗，Port {port} Bit {bit}，錯誤碼: 0x{ret.value:X}")
         return bool(data)
@@ -232,22 +190,6 @@ class DAQController:
         return {ch: bool((port_data >> ch) & 0x01) for ch in channels}
 
     # ─── 模擬模式輔助方法 ───────────────────────────────────────────────────────
-
-    def _simulate_ai(self, channel: int) -> float:
-        """模擬 AI 電壓讀取（用於無硬體時測試）"""
-        import math
-        import time
-        t = time.time()
-        # Hall (ch0~2): 3.3V 方波模擬，三相相差 120 度
-        if channel < 3:
-            return 3.3 if math.sin(2 * math.pi * 2 * t + channel * 2.094) > 0 else 0.0
-        # Encoder A (ch3): 5V 方波模擬
-        elif channel == 3:
-            return 5.0 if math.sin(2 * math.pi * 10 * t) > 0 else 0.0
-        # Encoder B (ch4): 5V 方波模擬，A/B 相差 90 度
-        elif channel == 4:
-            return 5.0 if math.sin(2 * math.pi * 10 * t - math.pi / 2) > 0 else 0.0
-        return 0.0
 
     def _simulate_di(self) -> int:
         """模擬 DI 數位讀取（用於無硬體時測試）"""

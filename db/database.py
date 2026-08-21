@@ -158,6 +158,35 @@ class DatabaseManager:
             )
         print(f"[DB] 場次 #{session_id} 序號已更新: {serial_no}")
 
+    def update_session_info(
+        self,
+        session_id: int,
+        serial_no: str,
+        operator: str,
+        notes: str = None
+    ):
+        """
+        更新場次的序號、操作員（及備註），允許測試後補填或修改
+        Args:
+            session_id: 場次 ID
+            serial_no:  馬達序號
+            operator:   操作員姓名
+            notes:      備註（None 表示不修改）
+        """
+        if notes is None:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE test_sessions SET serial_no = ?, operator = ? WHERE id = ?",
+                    (serial_no, operator, session_id)
+                )
+        else:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE test_sessions SET serial_no = ?, operator = ?, notes = ? WHERE id = ?",
+                    (serial_no, operator, notes, session_id)
+                )
+        print(f"[DB] 場次 #{session_id} 資訊已更新: 序號={serial_no or '(無)'}, 操作員={operator or '(無)'}")
+
     # ─── 結果操作 ──────────────────────────────────────────────────────────────
 
     def save_result(

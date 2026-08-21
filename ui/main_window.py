@@ -416,19 +416,44 @@ class MainWindow(QMainWindow):
         if self._is_monitoring:
             self._stop_monitoring()
 
-        success = self._daq.connect()
+        success, error_msg = self._daq.connect()
+
         if success:
+            # 真實硬體或已是模擬模式 → 直接進入監控
             mode = "模擬模式" if self._daq.is_simulation else "USB-4716"
             self._device_status_lbl.setText(f"● 已連線 ({mode})")
             self._device_status_lbl.setStyleSheet("color: #44FF44; font-size: 12px;")
             self._status_bar.showMessage(f"裝置已連線: {mode} | 監控中，訊號穩定後按「開始檢測」")
-            # 連線成功 → 自動開始監控
             self._start_monitoring()
+
         else:
-            self._device_status_lbl.setText("● 連線失敗")
-            self._device_status_lbl.setStyleSheet("color: #FF4444; font-size: 12px;")
-            self._status_bar.showMessage("裝置連線失敗，請檢查 USB-4716 連接")
-            self._btn_start.setEnabled(False)
+            # 有 SDK 但裝置未偵測到 → 詢問是否切換模擬模式
+            reply = QMessageBox.question(
+                self,
+                "裝置未偵測到",
+                f"無法連線到 {self._daq.device_description}\n\n"
+                f"錯誤原因：{error_msg}\n\n"
+                f"是否切換至【模擬模式】繼續？\n"
+                f"（模擬模式使用假資料，僅供 UI 操作確認，不代表真實量測結果）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply == QMessageBox.Yes:
+                # 使用者同意 → 強制切換模擬模式
+                self._daq._simulation_mode = True
+                self._daq._connected = True
+                self._device_status_lbl.setText("● 已連線 (模擬模式)")
+                self._device_status_lbl.setStyleSheet("color: #FFAA00; font-size: 12px;")
+                self._status_bar.showMessage("⚠ 模擬模式 | 使用假資料，僅供 UI 確認")
+                print("[MainWindow] 使用者選擇切換至模擬模式")
+                self._start_monitoring()
+            else:
+                # 使用者拒絕 → 保持未連線狀態
+                self._device_status_lbl.setText("● 連線失敗")
+                self._device_status_lbl.setStyleSheet("color: #FF4444; font-size: 12px;")
+                self._status_bar.showMessage("裝置連線失敗，請檢查 USB-4716 連接後重新連線")
+                self._btn_start.setEnabled(False)
 
     def _start_monitoring(self):
         """啟動監控模式：持續讀取 AI/DI，顯示即時波形"""
