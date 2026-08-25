@@ -5,13 +5,13 @@
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QSpinBox, QPushButton,
+    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton,
     QGroupBox, QDialogButtonBox, QFrame
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 
-from config.thresholds import DATABASE
+from config.thresholds import DATABASE, HALL_THRESHOLDS, ENCODER_THRESHOLDS
 
 
 DIALOG_STYLE = """
@@ -171,6 +171,62 @@ class SessionStartDialog(QDialog):
 
         layout.addWidget(setting_group)
 
+        # ── 量測參數設定 ───────────────────────────────────────────────────────
+        param_group = QGroupBox("量測參數設定")
+        param_form = QFormLayout(param_group)
+        param_form.setSpacing(8)
+        param_form.setLabelAlignment(Qt.AlignRight)
+
+        # Encoder PPR
+        self._ppr_spin = QSpinBox()
+        self._ppr_spin.setRange(1, 100000)
+        self._ppr_spin.setValue(ENCODER_THRESHOLDS["ppr"])
+        self._ppr_spin.setSuffix(" PPR")
+        self._ppr_spin.setToolTip("Encoder 每轉脈衝數")
+        param_form.addRow("Encoder PPR：", self._ppr_spin)
+
+        # Hall VH_min
+        self._hall_vh_spin = QDoubleSpinBox()
+        self._hall_vh_spin.setRange(0.0, 5.0)
+        self._hall_vh_spin.setSingleStep(0.1)
+        self._hall_vh_spin.setDecimals(2)
+        self._hall_vh_spin.setValue(HALL_THRESHOLDS["vh_min"])
+        self._hall_vh_spin.setSuffix(" V")
+        self._hall_vh_spin.setToolTip("Hall Sensor 高電位最低閾值")
+        param_form.addRow("Hall VH_min：", self._hall_vh_spin)
+
+        # Hall VL_max
+        self._hall_vl_spin = QDoubleSpinBox()
+        self._hall_vl_spin.setRange(0.0, 5.0)
+        self._hall_vl_spin.setSingleStep(0.1)
+        self._hall_vl_spin.setDecimals(2)
+        self._hall_vl_spin.setValue(HALL_THRESHOLDS["vl_max"])
+        self._hall_vl_spin.setSuffix(" V")
+        self._hall_vl_spin.setToolTip("Hall Sensor 低電位最高閾值")
+        param_form.addRow("Hall VL_max：", self._hall_vl_spin)
+
+        # Encoder VH_min
+        self._enc_vh_spin = QDoubleSpinBox()
+        self._enc_vh_spin.setRange(0.0, 10.0)
+        self._enc_vh_spin.setSingleStep(0.1)
+        self._enc_vh_spin.setDecimals(2)
+        self._enc_vh_spin.setValue(ENCODER_THRESHOLDS["vh_min"])
+        self._enc_vh_spin.setSuffix(" V")
+        self._enc_vh_spin.setToolTip("Encoder 高電位最低閾值")
+        param_form.addRow("Encoder VH_min：", self._enc_vh_spin)
+
+        # Encoder VL_max
+        self._enc_vl_spin = QDoubleSpinBox()
+        self._enc_vl_spin.setRange(0.0, 10.0)
+        self._enc_vl_spin.setSingleStep(0.1)
+        self._enc_vl_spin.setDecimals(2)
+        self._enc_vl_spin.setValue(ENCODER_THRESHOLDS["vl_max"])
+        self._enc_vl_spin.setSuffix(" V")
+        self._enc_vl_spin.setToolTip("Encoder 低電位最高閾值")
+        param_form.addRow("Encoder VL_max：", self._enc_vl_spin)
+
+        layout.addWidget(param_group)
+
         # ── 提示文字 ──────────────────────────────────────────────────────────
         hint = QLabel(
             "💡 提示：請確認訊號已穩定後再按「開始檢測」\n"
@@ -209,10 +265,15 @@ class SessionStartDialog(QDialog):
         取得使用者輸入的場次資訊
         Returns:
             dict: {
-                "serial_no":   str,   馬達序號
-                "operator":    str,   操作員
-                "duration_s":  float, 測試秒數
-                "duration_min": int,  測試分鐘數
+                "serial_no":    str,   馬達序號
+                "operator":     str,   操作員
+                "duration_s":   float, 測試秒數
+                "duration_min": int,   測試分鐘數
+                "ppr":          int,   Encoder PPR
+                "hall_vh_min":  float, Hall VH_min (V)
+                "hall_vl_max":  float, Hall VL_max (V)
+                "enc_vh_min":   float, Encoder VH_min (V)
+                "enc_vl_max":   float, Encoder VL_max (V)
             }
         """
         duration_min = self._duration_spin.value()
@@ -221,4 +282,9 @@ class SessionStartDialog(QDialog):
             "operator":     self._operator_edit.text().strip(),
             "duration_s":   float(duration_min * 60),
             "duration_min": duration_min,
+            "ppr":          self._ppr_spin.value(),
+            "hall_vh_min":  self._hall_vh_spin.value(),
+            "hall_vl_max":  self._hall_vl_spin.value(),
+            "enc_vh_min":   self._enc_vh_spin.value(),
+            "enc_vl_max":   self._enc_vl_spin.value(),
         }

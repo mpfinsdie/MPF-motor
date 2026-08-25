@@ -66,6 +66,8 @@ class WaveformWidget(QWidget):
         self._hall_plot.setYRange(-0.2, 3.8)
         self._hall_plot.showGrid(x=True, y=True, alpha=0.3)
         self._hall_plot.addLegend(offset=(10, 10))
+        # 滾輪只縮放 X 軸，Y 軸固定
+        self._hall_plot.getViewBox().setMouseEnabled(x=True, y=False)
 
         # Hall 閾值線
         vh_min = HALL_THRESHOLDS["vh_min"]
@@ -97,6 +99,8 @@ class WaveformWidget(QWidget):
         self._enc_plot.setYRange(-0.5, 6.0)
         self._enc_plot.showGrid(x=True, y=True, alpha=0.3)
         self._enc_plot.addLegend(offset=(10, 10))
+        # 滾輪只縮放 X 軸，Y 軸固定
+        self._enc_plot.getViewBox().setMouseEnabled(x=True, y=False)
 
         # Encoder 閾值線
         enc_vh_min = ENCODER_THRESHOLDS["vh_min"]
@@ -118,30 +122,12 @@ class WaveformWidget(QWidget):
                                       pen=pg.mkPen(COLORS["Encoder B"], width=2), name="Encoder B"),
         }
 
-        # ── Encoder DI 數位波形 ───────────────────────────────────────────────
-        self._di_plot = gl.addPlot(row=2, col=0, title="Encoder 數位訊號 (DI)")
-        self._di_plot.setLabel("left", "狀態")
-        self._di_plot.setLabel("bottom", "樣本點")
-        self._di_plot.setYRange(-0.2, 1.8)
-        self._di_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._di_plot.addLegend(offset=(10, 10))
-
-        # DI 波形曲線（A 偏移 0.5 以便區分）
-        self._di_curves = {
-            "A": self._di_plot.plot(x, np.zeros(self._buffer_size),
-                                     pen=pg.mkPen(COLORS["Encoder A"], width=2), name="Enc A (DI)"),
-            "B": self._di_plot.plot(x, np.zeros(self._buffer_size) + 0.5,
-                                     pen=pg.mkPen(COLORS["Encoder B"], width=2), name="Enc B (DI, +0.5)"),
-        }
-
         # 連結 X 軸縮放
         self._enc_plot.setXLink(self._hall_plot)
-        self._di_plot.setXLink(self._hall_plot)
 
         # 調整各圖高度比例
-        gl.ci.layout.setRowStretchFactor(0, 3)
-        gl.ci.layout.setRowStretchFactor(1, 3)
-        gl.ci.layout.setRowStretchFactor(2, 2)
+        gl.ci.layout.setRowStretchFactor(0, 1)
+        gl.ci.layout.setRowStretchFactor(1, 1)
 
     def update_hall_waveform(self, u_data: np.ndarray, v_data: np.ndarray, w_data: np.ndarray):
         """
@@ -163,16 +149,16 @@ class WaveformWidget(QWidget):
         self,
         a_voltage: np.ndarray,
         b_voltage: np.ndarray,
-        a_di: np.ndarray,
-        b_di: np.ndarray
+        a_di: np.ndarray = None,
+        b_di: np.ndarray = None
     ):
         """
-        更新 Encoder 波形
+        更新 Encoder 波形（僅顯示 AI 電壓，DI 數位訊號已移除）
         Args:
             a_voltage: Encoder A AI 電壓陣列
             b_voltage: Encoder B AI 電壓陣列
-            a_di: Encoder A DI 數位陣列
-            b_di: Encoder B DI 數位陣列
+            a_di: 保留參數（不使用）
+            b_di: 保留參數（不使用）
         """
         n = len(a_voltage)
         if n == 0:
@@ -181,12 +167,6 @@ class WaveformWidget(QWidget):
         self._enc_curves["A"].setData(x, a_voltage)
         self._enc_curves["B"].setData(x, b_voltage)
 
-        nd = len(a_di)
-        if nd > 0:
-            xd = np.arange(nd)
-            self._di_curves["A"].setData(xd, a_di.astype(float))
-            self._di_curves["B"].setData(xd, b_di.astype(float) + 0.5)
-
     def clear_all(self):
         """清除所有波形"""
         empty = np.zeros(self._buffer_size)
@@ -194,6 +174,4 @@ class WaveformWidget(QWidget):
         for curve in self._hall_curves.values():
             curve.setData(x, empty)
         for curve in self._enc_curves.values():
-            curve.setData(x, empty)
-        for curve in self._di_curves.values():
             curve.setData(x, empty)

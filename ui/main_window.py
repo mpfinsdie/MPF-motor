@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox, QFormLayout, QFrame, QProgressBar,
     QLineEdit, QInputDialog
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from config.thresholds import SAMPLING, HALL_THRESHOLDS, ENCODER_THRESHOLDS, DATABASE
@@ -114,10 +114,14 @@ class MainWindow(QMainWindow):
         SAVING     → 時間到或提前停止，寫入 DB
     """
 
+    # Qt Signal：場次完成時由背景執行緒 emit，確保 _save_session_result 在主執行緒執行
+    _session_done_signal = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("馬達測試系統 - Hall Sensor & Encoder 量測")
-        self.setMinimumSize(1280, 820)
+        self.setMinimumSize(1280, 600)
+        self.setMaximumHeight(600)
         self.setStyleSheet(MAIN_STYLE)
 
         # ── 核心 DAQ 元件 ─────────────────────────────────────────────────────
@@ -138,6 +142,9 @@ class MainWindow(QMainWindow):
         self._session.set_tick_callback(self._on_session_tick)
         self._session.set_done_callback(self._on_session_done)
         self._current_session_id: int = -1
+
+        # 連接 signal：確保場次完成時在主執行緒執行 _save_session_result
+        self._session_done_signal.connect(self._save_session_result)
 
         # ── 狀態旗標 ──────────────────────────────────────────────────────────
         self._is_monitoring = False   # 是否正在讀取 AI/DI（監控模式）
@@ -184,8 +191,6 @@ class MainWindow(QMainWindow):
 
         # 即時統計面板（檢測中顯示）
         right_layout.addWidget(self._build_live_stats_panel())
-
-        right_layout.addWidget(self._build_settings_panel())
 
         splitter.addWidget(right_panel)
         splitter.setSizes([820, 460])
@@ -341,62 +346,6 @@ class MainWindow(QMainWindow):
 
         return self._live_stats_group
 
-    def _build_settings_panel(self) -> QGroupBox:
-        """建立設定面板"""
-        group = QGroupBox("設定")
-        form = QFormLayout(group)
-        form.setSpacing(6)
-
-        # Encoder PPR 設定
-        self._ppr_spin = QSpinBox()
-        self._ppr_spin.setRange(1, 100000)
-        self._ppr_spin.setValue(ENCODER_THRESHOLDS["ppr"])
-        self._ppr_spin.setSuffix(" PPR")
-        self._ppr_spin.valueChanged.connect(self._on_ppr_changed)
-        form.addRow("Encoder PPR:", self._ppr_spin)
-
-        # Hall VH_min 設定
-        self._hall_vh_spin = QDoubleSpinBox()
-        self._hall_vh_spin.setRange(0.0, 5.0)
-        self._hall_vh_spin.setSingleStep(0.1)
-        self._hall_vh_spin.setDecimals(2)
-        self._hall_vh_spin.setValue(HALL_THRESHOLDS["vh_min"])
-        self._hall_vh_spin.setSuffix(" V")
-        self._hall_vh_spin.valueChanged.connect(self._on_hall_threshold_changed)
-        form.addRow("Hall VH_min:", self._hall_vh_spin)
-
-        # Hall VL_max 設定
-        self._hall_vl_spin = QDoubleSpinBox()
-        self._hall_vl_spin.setRange(0.0, 5.0)
-        self._hall_vl_spin.setSingleStep(0.1)
-        self._hall_vl_spin.setDecimals(2)
-        self._hall_vl_spin.setValue(HALL_THRESHOLDS["vl_max"])
-        self._hall_vl_spin.setSuffix(" V")
-        self._hall_vl_spin.valueChanged.connect(self._on_hall_threshold_changed)
-        form.addRow("Hall VL_max:", self._hall_vl_spin)
-
-        # Encoder VH_min 設定
-        self._enc_vh_spin = QDoubleSpinBox()
-        self._enc_vh_spin.setRange(0.0, 10.0)
-        self._enc_vh_spin.setSingleStep(0.1)
-        self._enc_vh_spin.setDecimals(2)
-        self._enc_vh_spin.setValue(ENCODER_THRESHOLDS["vh_min"])
-        self._enc_vh_spin.setSuffix(" V")
-        self._enc_vh_spin.valueChanged.connect(self._on_enc_threshold_changed)
-        form.addRow("Encoder VH_min:", self._enc_vh_spin)
-
-        # Encoder VL_max 設定
-        self._enc_vl_spin = QDoubleSpinBox()
-        self._enc_vl_spin.setRange(0.0, 10.0)
-        self._enc_vl_spin.setSingleStep(0.1)
-        self._enc_vl_spin.setDecimals(2)
-        self._enc_vl_spin.setValue(ENCODER_THRESHOLDS["vl_max"])
-        self._enc_vl_spin.setSuffix(" V")
-        self._enc_vl_spin.valueChanged.connect(self._on_enc_threshold_changed)
-        form.addRow("Encoder VL_max:", self._enc_vl_spin)
-
-        return group
-
     def _setup_timer(self):
         """設定 GUI 更新計時器（監控模式持續運行）"""
         self._update_timer = QTimer(self)
@@ -499,6 +448,21 @@ class MainWindow(QMainWindow):
         operator    = info["operator"]
         duration_s  = info["duration_s"]
 
+        # 套用參數設定
+        ENCODER_THRESHOLDS["ppr"] = info["ppr"]
+        self._di_reader._ppr = info["ppr"]
+        self._enc_analyzer.PPR = info["ppr"]
+
+        HALL_THRESHOLDS["vh_min"] = info["hall_vh_min"]
+        HALL_THRESHOLDS["vl_max"] = info["hall_vl_max"]
+        self._hall_analyzer.VH_MIN = info["hall_vh_min"]
+        self._hall_analyzer.VL_MAX = info["hall_vl_max"]
+
+        ENCODER_THRESHOLDS["vh_min"] = info["enc_vh_min"]
+        ENCODER_THRESHOLDS["vl_max"] = info["enc_vl_max"]
+        self._enc_analyzer.VH_MIN = info["enc_vh_min"]
+        self._enc_analyzer.VL_MAX = info["enc_vl_max"]
+
         # 更新場次時長
         self._session.duration_s = duration_s
 
@@ -530,7 +494,12 @@ class MainWindow(QMainWindow):
         self._session_info_lbl.setText("🔵 檢測中")
         self._serial_display_lbl.setText(serial_display)
 
+        # 立即更新倒數顯示（不等第一次 tick，避免顯示舊的初始值）
         total_min = int(duration_s // 60)
+        total_sec = int(duration_s) % 60
+        self._countdown_lbl.setText(f"{total_min:02d}:{total_sec:02d}")
+        self._progress_bar.setValue(0)
+
         self._status_bar.showMessage(
             f"檢測中 | {serial_display} | 時長: {total_min} 分鐘"
         )
@@ -552,41 +521,17 @@ class MainWindow(QMainWindow):
         self._save_session_result(stats)
 
     def _on_session_tick(self, elapsed_s: float, remaining_s: float):
-        """場次計時回呼（每秒觸發，來自背景執行緒，需透過 QTimer 更新 UI）"""
-        # 使用 QTimer.singleShot 確保在主執行緒更新 UI
-        from PyQt5.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(0, lambda: self._update_countdown(elapsed_s, remaining_s))
-
-    def _update_countdown(self, elapsed_s: float, remaining_s: float):
-        """在主執行緒更新倒數計時 UI"""
-        mins = int(remaining_s) // 60
-        secs = int(remaining_s) % 60
-        self._countdown_lbl.setText(f"{mins:02d}:{secs:02d}")
-
-        # 進度條（0~1000）
-        if self._session.duration_s > 0:
-            progress = int(elapsed_s / self._session.duration_s * 1000)
-            self._progress_bar.setValue(min(1000, progress))
-
-        # 即時統計
-        live = self._session.get_live_stats()
-        self._hall_pass_lbl.setText(f"PASS: {live['hall_pass']}")
-        self._hall_fail_lbl.setText(f"FAIL: {live['hall_fail']}")
-        hall_rate = live['hall_pass_rate'] * 100
-        self._hall_rate_lbl.setText(f"成功率: {hall_rate:.1f}%")
-
-        self._enc_pass_lbl.setText(f"PASS: {live['enc_pass']}")
-        self._enc_fail_lbl.setText(f"FAIL: {live['enc_fail']}")
-        enc_rate = live['enc_pass_rate'] * 100
-        self._enc_rate_lbl.setText(f"成功率: {enc_rate:.1f}%")
-
-        self._avg_rpm_lbl.setText(f"平均 RPM: {live['avg_rpm']:.1f}")
-        self._max_rpm_lbl.setText(f"最高: {live['max_rpm']:.1f}")
+        """場次計時回呼（每秒觸發，來自背景執行緒）
+        倒數 UI 已改由主執行緒 QTimer (_update_display) 直接更新，此回呼保留供未來擴充用。
+        """
+        pass  # 不再透過 singleShot 更新 UI，避免跨執行緒排程延遲問題
 
     def _on_session_done(self, stats):
-        """場次完成回呼（時間到後由背景執行緒觸發）"""
-        from PyQt5.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(0, lambda: self._save_session_result(stats))
+        """場次完成回呼（時間到後由背景執行緒觸發）
+        透過 pyqtSignal 確保 _save_session_result 在主執行緒執行，
+        避免 QTimer.singleShot 在非主執行緒呼叫時可能失效的問題。
+        """
+        self._session_done_signal.emit(stats)
 
     def _save_session_result(self, stats):
         """儲存場次結果至 DB 並更新 UI"""
@@ -702,28 +647,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "錯誤", f"變更路徑失敗：\n{e}")
 
-    # ─── 設定變更 ──────────────────────────────────────────────────────────────
-
-    def _on_ppr_changed(self, value: int):
-        """更新 Encoder PPR"""
-        ENCODER_THRESHOLDS["ppr"] = value
-        self._di_reader._ppr = value
-        self._enc_analyzer.PPR = value
-
-    def _on_hall_threshold_changed(self):
-        """更新 Hall 電壓閾值"""
-        HALL_THRESHOLDS["vh_min"] = self._hall_vh_spin.value()
-        HALL_THRESHOLDS["vl_max"] = self._hall_vl_spin.value()
-        self._hall_analyzer.VH_MIN = HALL_THRESHOLDS["vh_min"]
-        self._hall_analyzer.VL_MAX = HALL_THRESHOLDS["vl_max"]
-
-    def _on_enc_threshold_changed(self):
-        """更新 Encoder 電壓閾值"""
-        ENCODER_THRESHOLDS["vh_min"] = self._enc_vh_spin.value()
-        ENCODER_THRESHOLDS["vl_max"] = self._enc_vl_spin.value()
-        self._enc_analyzer.VH_MIN = ENCODER_THRESHOLDS["vh_min"]
-        self._enc_analyzer.VL_MAX = ENCODER_THRESHOLDS["vl_max"]
-
     # ─── 顯示更新 ──────────────────────────────────────────────────────────────
 
     def _update_display(self):
@@ -731,8 +654,42 @@ class MainWindow(QMainWindow):
         try:
             self._update_waveforms()
             self._update_analysis()
+            # 若場次正在執行，在主執行緒直接更新倒數計時與即時統計
+            # 不依賴背景執行緒的 singleShot，避免跨執行緒排程延遲
+            if self._session.is_running:
+                self._update_session_ui()
         except Exception as e:
             print(f"[MainWindow] 顯示更新錯誤: {e}")
+
+    def _update_session_ui(self):
+        """在主執行緒更新倒數計時與即時統計（由 _update_display 每 50ms 呼叫）"""
+        elapsed_s   = self._session.elapsed_s
+        remaining_s = self._session.remaining_s
+
+        # 倒數計時
+        mins = int(remaining_s) // 60
+        secs = int(remaining_s) % 60
+        self._countdown_lbl.setText(f"{mins:02d}:{secs:02d}")
+
+        # 進度條（0~1000）
+        if self._session.duration_s > 0:
+            progress = int(elapsed_s / self._session.duration_s * 1000)
+            self._progress_bar.setValue(min(1000, progress))
+
+        # 即時統計
+        live = self._session.get_live_stats()
+        self._hall_pass_lbl.setText(f"PASS: {live['hall_pass']}")
+        self._hall_fail_lbl.setText(f"FAIL: {live['hall_fail']}")
+        hall_rate = live['hall_pass_rate'] * 100
+        self._hall_rate_lbl.setText(f"成功率: {hall_rate:.1f}%")
+
+        self._enc_pass_lbl.setText(f"PASS: {live['enc_pass']}")
+        self._enc_fail_lbl.setText(f"FAIL: {live['enc_fail']}")
+        enc_rate = live['enc_pass_rate'] * 100
+        self._enc_rate_lbl.setText(f"成功率: {enc_rate:.1f}%")
+
+        self._avg_rpm_lbl.setText(f"平均 RPM: {live['avg_rpm']:.1f}")
+        self._max_rpm_lbl.setText(f"最高: {live['max_rpm']:.1f}")
 
     def _update_waveforms(self):
         """更新波形顯示"""

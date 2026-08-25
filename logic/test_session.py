@@ -135,7 +135,8 @@ class TestSession:
 
     @duration_s.setter
     def duration_s(self, value: float):
-        if self._state == SessionState.IDLE:
+        # IDLE 或 DONE 狀態都允許設定（DONE 是上次測試完成後尚未 reset 的狀態）
+        if self._state in (SessionState.IDLE, SessionState.DONE):
             self._duration_s = max(10.0, value)
 
     @property
@@ -320,6 +321,7 @@ class TestSession:
 
     def _timer_loop(self):
         """計時執行緒：每秒觸發 tick_callback，時間到後觸發 done_callback"""
+        print(f"[TestSession] _timer_loop 啟動，duration={self._duration_s:.0f}s")
         while not self._stop_event.is_set():
             elapsed   = self.elapsed_s
             remaining = self.remaining_s
@@ -329,6 +331,7 @@ class TestSession:
                     self._tick_callback(elapsed, remaining)
                 except Exception as e:
                     print(f"[TestSession] tick_callback 錯誤: {e}")
+                    
 
             if remaining <= 0:
                 # 時間到，自動停止
@@ -337,9 +340,18 @@ class TestSession:
 
             self._stop_event.wait(timeout=1.0)
 
-        # 時間到後觸發完成回呼
+        # 時間到後：在執行緒內直接計算統計，不呼叫 stop()（避免 join 自身）
+        # 手動停止（_on_early_stop）會呼叫 stop()，此時 _state 已是 SAVING/DONE，不會進入此分支
         if self._state == SessionState.RUNNING:
-            stats = self.stop()
+            self._state = SessionState.SAVING
+            stats = self._compute_statistics()
+            self._state = SessionState.DONE
+            print(
+                f"[TestSession] 場次結束（時間到）  "
+                f"Hall={stats.hall_pass}/{stats.hall_total}  "
+                f"Enc={stats.enc_pass}/{stats.enc_total}  "
+                f"整體={'PASS' if stats.overall_pass else 'FAIL'}"
+            )
             if self._done_callback:
                 try:
                     self._done_callback(stats)

@@ -525,7 +525,7 @@ class HistoryViewer(QDialog):
         group = QGroupBox("測試物件資訊")
         form = QFormLayout(group)
         form.setSpacing(10)
-        form.setLabelAlignment(0x0002)  # Qt.AlignRight
+        form.setLabelAlignment(Qt.AlignRight)
 
         serial_edit = QLineEdit(rec.get("serial_no") or "")
         serial_edit.setPlaceholderText("例：MTR-2026-001")

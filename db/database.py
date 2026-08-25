@@ -11,8 +11,18 @@ from typing import Optional, List, Dict, Any
 
 
 # 預設資料庫路徑
-DEFAULT_DB_PATH = str(Path(__file__).parent.parent / "data" / "motor_test.db")
+# DEFAULT_DB_PATH = str(Path(__file__).parent.parent / "data" / "motor_test.db")
+import sys
 
+def _get_default_db_path() -> str:
+    # 執行檔模式：寫到執行檔同層的 data/ 目錄
+    if getattr(sys, 'frozen', False):
+        base = Path(sys.executable).parent
+    else:
+        base = Path(__file__).parent.parent
+    return str(base / "data" / "motor_test.db")
+
+DEFAULT_DB_PATH = _get_default_db_path()
 
 class DatabaseManager:
     """

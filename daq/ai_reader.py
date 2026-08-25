@@ -101,12 +101,14 @@ class AIReader:
         if self._running:
             return
 
+        # 必須在啟動執行緒/串流之前設為 True，
+        # 否則 _sim_loop() 的 while self._running 在執行緒啟動瞬間就會因 False 而立即結束
+        self._running = True
+
         if self._daq.is_simulation:
             self._start_simulation()
         else:
             self._start_waveform_ai()
-
-        self._running = True
 
     def stop(self):
         """停止 AI 讀取"""
