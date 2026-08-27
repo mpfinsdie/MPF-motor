@@ -53,17 +53,19 @@ class DatabaseManager:
         return conn
 
     def _init_db(self):
-        """建立資料表（若不存在）"""
+        """建立資料表（若不存在），並執行 schema migration"""
         with self._get_conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS test_sessions (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    serial_no   TEXT    DEFAULT '',
-                    operator    TEXT    DEFAULT '',
-                    started_at  TEXT    NOT NULL,
-                    ended_at    TEXT,
-                    duration_s  REAL,
-                    notes       TEXT    DEFAULT ''
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    serial_no      TEXT    DEFAULT '',
+                    operator       TEXT    DEFAULT '',
+                    started_at     TEXT    NOT NULL,
+                    ended_at       TEXT,
+                    duration_s     REAL,
+                    notes          TEXT    DEFAULT '',
+                    waveform_path  TEXT    DEFAULT '',
+                    session_type   TEXT    DEFAULT 'test'
                 );
 
                 CREATE TABLE IF NOT EXISTS test_results (
@@ -90,7 +92,27 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_results_session_id
                     ON test_results(session_id);
             """)
+            # Schema migration：為舊資料庫補上欄位
+            self._migrate_add_column(conn, "test_sessions", "waveform_path",   "TEXT DEFAULT ''")
+            self._migrate_add_column(conn, "test_sessions", "session_type",    "TEXT DEFAULT 'test'")
+            # 診斷 PASS/FAIL 欄位（診斷場次用）
+            self._migrate_add_column(conn, "test_sessions", "diag_pass",       "INTEGER DEFAULT -1")
+            self._migrate_add_column(conn, "test_sessions", "diag_ch_results", "TEXT DEFAULT ''")
         print(f"[DB] 資料庫已初始化: {self._db_path}")
+
+    def _migrate_add_column(self, conn: sqlite3.Connection, table: str, column: str, col_def: str):
+        """
+        安全地為既有資料表新增欄位（若欄位已存在則跳過）
+        Args:
+            conn:    資料庫連線
+            table:   資料表名稱
+            column:  欄位名稱
+            col_def: 欄位定義（如 "TEXT DEFAULT ''"）
+        """
+        existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+            print(f"[DB] Migration: {table}.{column} 欄位已新增")
 
     # ─── 路徑管理 ──────────────────────────────────────────────────────────────
 
@@ -115,26 +137,28 @@ class DatabaseManager:
         self,
         serial_no: str = "",
         operator: str = "",
-        notes: str = ""
+        notes: str = "",
+        session_type: str = "test"
     ) -> int:
         """
         建立新測試場次
         Args:
-            serial_no: 馬達/測試物件序號
-            operator:  操作員名稱
-            notes:     備註
+            serial_no:    馬達/測試物件序號
+            operator:     操作員名稱
+            notes:        備註
+            session_type: 場次類型，'test'=一般測試，'diagnostic'=高取樣診斷
         Returns:
             int: 新建場次的 ID
         """
         started_at = datetime.now().isoformat(timespec="seconds")
         with self._get_conn() as conn:
             cursor = conn.execute(
-                """INSERT INTO test_sessions (serial_no, operator, started_at, notes)
-                   VALUES (?, ?, ?, ?)""",
-                (serial_no, operator, started_at, notes)
+                """INSERT INTO test_sessions (serial_no, operator, started_at, notes, session_type)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (serial_no, operator, started_at, notes, session_type)
             )
             session_id = cursor.lastrowid
-        print(f"[DB] 建立場次 #{session_id}  序號={serial_no or '(無)'}")
+        print(f"[DB] 建立場次 #{session_id}  序號={serial_no or '(無)'}  類型={session_type}")
         return session_id
 
     def close_session(self, session_id: int, duration_s: float):
@@ -153,6 +177,37 @@ class DatabaseManager:
                 (ended_at, duration_s, session_id)
             )
         print(f"[DB] 場次 #{session_id} 已結束，歷時 {duration_s:.1f} 秒")
+
+    def update_waveform_path(self, session_id: int, waveform_path: str):
+        """
+        更新場次的波形檔案路徑（FAIL 時儲存波形後呼叫）
+        Args:
+            session_id:    場次 ID
+            waveform_path: .npz 波形檔案的絕對路徑
+        """
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE test_sessions SET waveform_path = ? WHERE id = ?",
+                (waveform_path, session_id)
+            )
+        print(f"[DB] 場次 #{session_id} 波形路徑已更新: {waveform_path}")
+
+    def get_waveform_path(self, session_id: int) -> Optional[str]:
+        """
+        取得場次的波形檔案路徑
+        Args:
+            session_id: 場次 ID
+        Returns:
+            str: 波形檔案路徑（無資料時回傳 None）
+        """
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT waveform_path FROM test_sessions WHERE id = ?",
+                (session_id,)
+            ).fetchone()
+        if row and row["waveform_path"]:
+            return row["waveform_path"]
+        return None
 
     def update_session_serial(self, session_id: int, serial_no: str):
         """
@@ -267,23 +322,30 @@ class DatabaseManager:
     def query_sessions(
         self,
         limit: int = 200,
-        serial_filter: str = ""
+        serial_filter: str = "",
+        session_type: str = ""
     ) -> List[Dict[str, Any]]:
         """
         查詢測試場次列表（含統計結果）
         Args:
             limit:         最多回傳筆數
             serial_filter: 依序號篩選（空字串=全部）
+            session_type:  依類型篩選（空字串=全部，'test'=一般，'diagnostic'=診斷）
         Returns:
             List[dict]: 場次資料列表，依時間倒序排列
         """
-        where_clause = ""
+        where_parts = []
         params: list = []
 
         if serial_filter:
-            where_clause = "WHERE s.serial_no LIKE ?"
+            where_parts.append("s.serial_no LIKE ?")
             params.append(f"%{serial_filter}%")
 
+        if session_type:
+            where_parts.append("s.session_type = ?")
+            params.append(session_type)
+
+        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
         params.append(limit)
 
         with self._get_conn() as conn:
@@ -296,6 +358,8 @@ class DatabaseManager:
                     s.ended_at,
                     s.duration_s,
                     s.notes                 AS session_notes,
+                    s.waveform_path,
+                    s.session_type,
                     r.hall_total,
                     r.hall_pass,
                     r.hall_fail,
@@ -319,6 +383,71 @@ class DatabaseManager:
 
         return [dict(row) for row in rows]
 
+    def create_diagnostic_session(
+        self,
+        operator: str = "",
+        notes: str = ""
+    ) -> int:
+        """
+        建立診斷場次（session_type='diagnostic'）
+        Args:
+            operator: 操作員名稱
+            notes:    備註
+        Returns:
+            int: 新建場次的 ID
+        """
+        return self.create_session(
+            serial_no="[診斷]",
+            operator=operator,
+            notes=notes,
+            session_type="diagnostic"
+        )
+
+    def close_diagnostic_session(
+        self,
+        session_id: int,
+        duration_s: float,
+        npz_path: str,
+        completed: bool,
+        rounds_done: int,
+        diag_pass: bool = None,
+        diag_ch_results: str = ""
+    ):
+        """
+        結束診斷場次，記錄結束時間、波形路徑、完成狀態與診斷 PASS/FAIL 結果
+
+        Args:
+            session_id:       場次 ID
+            duration_s:       實際診斷秒數
+            npz_path:         診斷 npz 檔案路徑
+            completed:        是否跑完所有輪次
+            rounds_done:      已完成輪數
+            diag_pass:        診斷整體 PASS/FAIL（None 表示未分析）
+            diag_ch_results:  各通道診斷結果 JSON 字串（供歷史記錄顯示）
+        """
+        ended_at = datetime.now().isoformat(timespec="seconds")
+        notes = f"完成={'是' if completed else '否（提早停止）'}，已完成 {rounds_done} 輪"
+        if diag_pass is not None:
+            notes += f"，診斷={'PASS' if diag_pass else 'FAIL'}"
+
+        # diag_pass: 1=PASS, 0=FAIL, -1=未分析
+        diag_pass_int = (1 if diag_pass else 0) if diag_pass is not None else -1
+
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE test_sessions
+                   SET ended_at = ?, duration_s = ?, waveform_path = ?, notes = ?,
+                       diag_pass = ?, diag_ch_results = ?
+                   WHERE id = ?""",
+                (ended_at, duration_s, npz_path or "", notes,
+                 diag_pass_int, diag_ch_results or "", session_id)
+            )
+        print(
+            f"[DB] 診斷場次 #{session_id} 已結束，"
+            f"歷時 {duration_s:.1f}s，npz={npz_path}，"
+            f"診斷={'PASS' if diag_pass else 'FAIL' if diag_pass is not None else '未分析'}"
+        )
+
     def get_session_detail(self, session_id: int) -> Optional[Dict[str, Any]]:
         """
         取得單一場次詳細資料
@@ -338,6 +467,7 @@ class DatabaseManager:
                 WHERE s.id = ?""",
                 (session_id,)
             ).fetchone()
+        # s.* 已包含 waveform_path
         return dict(row) if row else None
 
     def delete_session(self, session_id: int):

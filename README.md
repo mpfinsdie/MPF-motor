@@ -8,13 +8,13 @@
 ## 功能特色
 
 ### Hall Sensor (3.3V 系統)
-- AI 通道量測三相 (U/V/W) 電壓準位（WaveformAI 硬體串流，10,000 Hz/通道）
+- AI 通道量測三相 (U/V/W) 電壓準位（InstantAI 輪詢監控，診斷模式可達 200,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - AI 與 DI 一致性驗證
 - 電壓閾值判斷：H > 2.0V，L < 0.8V（可調整）
 
 ### Encoder (5V 系統)
-- AI 通道量測 A/B 相電壓準位（WaveformAI 硬體串流，10,000 Hz/通道）
+- AI 通道量測 A/B 相電壓準位（InstantAI 輪詢監控，診斷模式可達 200,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - 電壓閾值判斷：H > 3.5V，L < 1.5V（可調整）
 - 軟體正交解碼（A/B 相位差 90°）
@@ -26,13 +26,27 @@
 - PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形（AI 電壓，含閾值線）
-- 即時 PASS/FAIL 結果顯示
+- **即時觀察面板（10 kHz 監控）**：顯示各通道即時電壓與 H/L/X 準位（不做 PASS/FAIL 判斷）
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
 - 視窗高度固定 600px，波形圖滾輪縮放僅作用於 X 軸（時間軸）
+- **監控預設關閉**：連線後不自動啟動 AI/DI 輪詢，需手動按「📡 監控開關」啟動
+
+### 🔬 高取樣率診斷模式（v1.4 新增，v1.5 提升至 200 kS/s，v1.6 新增波形診斷分析）
+- **獨立診斷模式**：另加「🔬 高取樣診斷」按鈕啟動（監控模式與診斷模式互斥）
+- **逐通道高速採樣**：一次專注 1 個 AI 通道，以 **200,000 Hz**（硬體最高）連續採樣 **10 秒**
+- **輪流掃描**：CH0（Hall U）→ CH1（Hall V）→ CH2（Hall W）→ CH3（Encoder A）→ CH4（Encoder B），跑滿 **2 輪**後自動結束
+- **提早結束**：使用者可隨時按「⏹ 結束診斷」提早停止，已採資料仍會儲存
+- **即時波形顯示**：診斷期間切換至全寬診斷視圖，每 0.1 秒（20,000 點）串流更新當前 CH 波形；自動 decimation 降採樣確保 UI 流暢
+- **滾動視窗**：即時波形顯示最近 100,000 點（0.5 秒 @ 200kHz），含通道名稱、閾值線、倒數計時
+- **資料儲存**：所有 CH × 輪次資料合併存成單一 `.npz` 檔案（`data/diagnostics/`）；每通道約 7.6 MB（float32），5CH × 2 輪壓縮後約 10~20 MB
+- **🆕 高速波形診斷分析**：診斷完成後自動呼叫 `DiagAnalyzer` 對每通道高速波形做 H/L 比例、不定態比例、邊緣計數、頻率估算，輸出各通道與整體 PASS/FAIL
+- **🆕 診斷結果顯示**：診斷完成對話框顯示各通道分析結果（H/L/X 比例、邊緣數、頻率、PASS/FAIL）
+- **歷史記錄**：診斷場次寫入 DB（含 `diag_pass` 與各通道摘要 JSON），可在「📋 歷史記錄」中查看診斷 PASS/FAIL 與各通道結果，並以「🔬 回看診斷」按鈕回放波形
+- **硬體上限自動偵測**：`enter_diag_mode()` 自動查詢 `AiFeatures.convertClockRange`，將取樣率 clamp 至硬體實際上限，避免超規導致 `prepare()` 失敗
 
 ### 測試場次管理（v1.1 新增）
-- 連線後**立即開始監控**，操作員觀察訊號穩定後再手動觸發檢測
+- 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 10 kHz 即時觀察，確認訊號後再手動觸發檢測
 - 每次檢測前可輸入**馬達序號**、操作員名稱，並設定量測參數（PPR、電壓閾值）
 - 預設 **5 分鐘**計時，可調整（1~60 分鐘），支援提前停止
 - 結果**自動儲存至 SQLite 資料庫**，不需手動操作
@@ -42,6 +56,7 @@
 - SQLite 資料庫，預設路徑 `data/motor_test.db`，可在 UI 中變更
 - 歷史查詢視窗：表格顯示所有場次，支援序號篩選、匯出 CSV、刪除記錄
 - 全域統計摘要：總場次數、整體 PASS 率、平均成功率
+- **場次類型區分**：📋 測試場次（灰色）與 🔬 診斷場次（藍色）分色顯示
 
 ### 報表輸出
 - Excel (.xlsx) 格式：含摘要、Hall、Encoder 三個工作表（手動匯出）
@@ -168,7 +183,9 @@ python main.py
 ```
 啟動程式
   ↓
-自動連線 USB-4716（連線成功後立即開始監控）
+自動連線 USB-4716（連線成功後監控預設關閉）
+  ↓
+按「📡 監控開關」啟動 10 kHz 即時觀察（可選）
   ↓
 觀察即時波形，確認訊號穩定
   ↓
@@ -187,11 +204,14 @@ python main.py
 
 | 按鈕 | 說明 |
 |------|------|
+| **📡 監控開關** | 切換 10 kHz 即時監控（AI/DI 輪詢）開/關；連線後預設關閉 |
 | **▶ 開始檢測** | 開啟場次設定對話框，輸入序號、設定參數後開始計時 |
 | **⏹ 提前停止** | 提前結束檢測並儲存目前統計結果 |
+| **🔬 高取樣診斷** | 啟動高取樣率診斷模式（暫停監控，逐 CH 200kHz 採樣，完成後自動分析 PASS/FAIL） |
+| **⏹ 結束診斷** | 提早結束診斷，已採資料仍會儲存並分析 |
 | **↺ 重置計數** | 重置 Encoder 計數器 |
 | **💾 匯出報表** | 匯出最近一次場次的原始數據（Excel/CSV） |
-| **📋 歷史記錄** | 開啟歷史查詢視窗，查看所有場次統計 |
+| **📋 歷史記錄** | 開啟歷史查詢視窗，查看所有場次統計（含診斷 PASS/FAIL） |
 | **🗄 DB 路徑** | 變更 SQLite 資料庫儲存路徑 |
 | **🔌 重新連線** | 重新連線 USB-4716 |
 
@@ -211,6 +231,43 @@ python main.py
 - **Hall VH_min / VL_max**：Hall Sensor 電壓閾值
 - **Encoder VH_min / VL_max**：Encoder 電壓閾值
 
+### 高取樣率診斷流程
+
+```
+點擊「🔬 高取樣診斷」
+  ↓
+確認對話框（顯示通道數、取樣率、預計時長）
+  ↓
+暫停即時監控（若有開啟）→ 切換至診斷視圖（全寬波形圖）
+  ↓
+逐通道採樣（CH0 Hall U → CH1 Hall V → CH2 Hall W → CH3 Enc A → CH4 Enc B）
+  │  每 CH 10 秒 × 200,000 Hz，每 0.1 秒串流 20,000 點至即時波形圖（自動 decimation）
+  │  進度列顯示：當前通道名稱、第幾輪、倒數計時、整體進度條
+  ├─ 使用者按「⏹ 結束診斷」→ 提早停止，已採資料仍儲存
+  └─ 跑完 2 輪 → 自動結束
+  ↓
+合併所有 CH × 輪次資料 → 存成單一 .npz（data/diagnostics/diag_YYYYMMDD_HHMMSS.npz）
+  ↓
+DiagAnalyzer 分析各通道高速波形（H/L 比例、不定態比例、邊緣計數、頻率估算）
+  ↓
+計算各通道與整體 PASS/FAIL → 寫入 DB（diag_pass、diag_ch_results）
+  ↓
+顯示診斷結果對話框（各通道分析數據與 PASS/FAIL）
+  ↓
+監控維持關閉（需手動按「📡 監控開關」重新啟動）
+```
+
+### 診斷波形回放
+
+1. 點擊「📋 歷史記錄」開啟歷史查詢視窗
+2. 選取一筆 🔬 診斷場次（藍色標示）
+3. 點擊「🔬 回看診斷」按鈕
+4. 在回放對話框中：
+   - 左側選擇要查看的**通道**（Hall U/V/W、Encoder A/B）
+   - 左側選擇要查看的**輪次**（第 1 輪 / 第 2 輪）
+   - 右側顯示完整 10 秒波形（含閾值線）
+   - 使用滑桿、播放/暫停、步進按鈕瀏覽波形
+
 ### 歷史查詢視窗
 
 1. 點擊「📋 歷史記錄」開啟
@@ -218,6 +275,9 @@ python main.py
 3. 點選任一列查看詳細資訊
 4. 「💾 匯出 CSV」匯出目前顯示的所有記錄
 5. 「🗑 刪除選取」刪除選取的場次記錄
+6. 場次類型欄位：📋 測試（灰色）/ 🔬 診斷（藍色）
+7. 診斷場次「整體結果」欄顯示高速診斷 PASS/FAIL（✔ PASS 綠色 / ✘ FAIL 紅色 / — 未分析）
+8. 點選診斷場次可在詳細資訊框查看各通道分析結果（H/L/X 比例、邊緣數、頻率）
 
 ---
 
@@ -236,35 +296,41 @@ MPF-motor/
 │       └── ...
 │
 ├── data/                          # 資料庫儲存目錄（自動建立）
-│   └── motor_test.db              # SQLite 測試記錄資料庫
+│   ├── motor_test.db              # SQLite 測試記錄資料庫
+│   └── diagnostics/               # 高取樣診斷 npz 儲存目錄（v1.4 新增）
+│       └── diag_YYYYMMDD_HHMMSS.npz
 │
 ├── config/
 │   ├── __init__.py
-│   └── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑
+│   └── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑、診斷設定
 │
 ├── daq/
 │   ├── __init__.py
-│   ├── daq_controller.py          # USB-4716 裝置控制器（WaveformAI + InstantDI）
-│   ├── ai_reader.py               # 類比輸入讀取（WaveformAI 事件驅動，10 kHz）
+│   ├── daq_controller.py          # USB-4716 裝置控制器（含診斷模式切換）
+│   ├── ai_reader.py               # 類比輸入讀取（InstantAI 輪詢，監控用，預設關閉）
 │   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 軟體計數）
 │
 ├── db/                            # 資料庫模組（v1.1 新增）
 │   ├── __init__.py
-│   └── database.py                # SQLite CRUD 封裝（DatabaseManager）
+│   └── database.py                # SQLite CRUD 封裝（含診斷場次支援）
 │
 ├── logic/
 │   ├── __init__.py
-│   ├── hall_analyzer.py           # Hall Sensor 分析邏輯
-│   ├── encoder_analyzer.py        # Encoder 分析邏輯
-│   └── test_session.py            # 測試場次管理 + 統計計算（v1.1 新增）
+│   ├── hall_analyzer.py           # Hall Sensor 分析邏輯（保留供參考）
+│   ├── encoder_analyzer.py        # Encoder 分析邏輯（保留供參考）
+│   ├── diag_analyzer.py           # 高速波形診斷分析器（v1.6 新增）
+│   ├── test_session.py            # 測試場次管理 + 統計計算（v1.1 新增）
+│   └── diagnostic_scanner.py      # 高取樣率診斷掃描器（v1.4 新增）
 │
 ├── ui/
 │   ├── __init__.py
-│   ├── main_window.py             # PyQt5 主視窗（v1.1 重構）
-│   ├── waveform_widget.py         # pyqtgraph 即時波形元件
-│   ├── result_panel.py            # 測試結果顯示面板
+│   ├── main_window.py             # PyQt5 主視窗（含診斷模式）
+│   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式）
+│   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
+│   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
+│   ├── result_panel.py            # 即時觀察面板（10 kHz 監控，僅顯示電壓/準位，無 PASS/FAIL）
 │   ├── session_dialog.py          # 場次啟動對話框（v1.1 新增）
-│   └── history_viewer.py          # 歷史查詢視窗（v1.1 新增）
+│   └── history_viewer.py          # 歷史查詢視窗（含診斷場次識別）
 │
 └── report/
     ├── __init__.py
@@ -273,44 +339,143 @@ MPF-motor/
 
 ---
 
-## AI 取樣架構（v1.2 改造）
+## 高取樣率診斷架構（v1.4 新增，v1.5 提升至 200 kS/s）
 
-### WaveformAiCtrl 硬體串流模式
+### 設計動機
 
-v1.2 起 AI 讀取改用 `WaveformAiCtrl` 硬體緩衝串流，取代原本的 `InstantAiCtrl` 逐通道輪詢：
+原本監控模式使用 `InstantAiCtrl` 同時輪詢 5 個 AI 通道，實際每通道取樣率約 100 Hz，不足以捕捉 Hall Sensor 與 Encoder 的高頻細節。診斷模式改用 `WaveformAiCtrl` 單通道高速採樣，達到硬體最高 **200,000 Hz**（USB-4716 單通道上限）。
+
+### 硬體互斥設計
+
+`WaveformAiCtrl`（診斷）與 `InstantAiCtrl`（監控）不能同時佔用 USB-4716，因此：
+
+```
+監控模式（InstantAiCtrl）
+  ↓ 使用者按「🔬 高取樣診斷」
+enter_diag_mode()：釋放 InstantAiCtrl → 建立 WaveformAiCtrl
+  ↓ 診斷完成或提早停止
+exit_diag_mode()：釋放 WaveformAiCtrl → 重建 InstantAiCtrl
+  ↓
+恢復監控模式
+```
+
+### 診斷資料流
+
+```
+WaveformAiCtrl（單通道，200,000 Hz）
+  │  sectionLength=20000, sectionCount=8
+  │  每 0.1 秒（20,000 點）觸發一次讀取
+  │  環形緩衝深度 = 8 × 20,000 = 160,000 點（0.8s），防 overrun
+  ↓
+DiagnosticScanner._scan_channel_hw()
+  │  clamp_clock_rate() 自動 clamp 至硬體上限
+  │  chunk_callback(ch_idx, round_idx, chunk_20000pts, elapsed_s)
+  ↓ pyqtSignal（跨執行緒安全）
+MainWindow._on_diag_chunk()（主執行緒）
+  │
+  ↓
+DiagnosticWidget.append_chunk()
+  │  deque 滾動緩衝（最近 100,000 點 = 0.5s）
+  │  自動 decimation：超過 5,000 點時等間距抽稀再繪圖
+  ↓
+pyqtgraph 即時波形更新（每 0.1 秒，繪圖點數 ≤ 5,000）
+```
+
+### 診斷 npz 格式
+
+```python
+# 儲存路徑：data/diagnostics/diag_YYYYMMDD_HHMMSS.npz
+# 資料量：200,000 Hz × 10s × 5CH × 2輪 ≈ 76 MB（壓縮後約 10~20 MB）
+{
+    "ch0_round0": np.ndarray(float32, shape=(2000000,)),  # CH0 第1輪 10秒資料（200kHz × 10s）
+    "ch1_round0": np.ndarray(float32, shape=(2000000,)),  # CH1 第1輪
+    ...
+    "ch4_round1": np.ndarray(float32, shape=(2000000,)),  # CH4 第2輪
+    "sample_rate":    np.array([200000], dtype=int32),    # 200 kS/s
+    "seconds_per_ch": np.array([10],    dtype=int32),
+    "rounds":         np.array([2],     dtype=int32),
+    "ch_count":       np.array([5],     dtype=int32),
+    "channel_names":  np.array(["Hall U", "Hall V", "Hall W", "Encoder A", "Encoder B"]),
+    "channel_nums":   np.array([0, 1, 2, 3, 4], dtype=int32),
+    "diag_type":      np.array(["sequential_ch"]),  # 識別標記
+}
+```
+
+### 診斷設定（`config/thresholds.py`）
+
+| 參數 | 值 | 說明 |
+|------|--------|------|
+| `HW_MAX_SAMPLE_RATE` | **200,000 Hz** | 硬體最高取樣率常數（USB-4716 單通道上限） |
+| `sample_rate` | **200,000 Hz** | 每通道取樣率（診斷模式，WaveformAiCtrl 單通道） |
+| `seconds_per_ch` | 10 秒 | 每個通道採樣秒數（每通道 2,000,000 點） |
+| `rounds` | 2 | 總輪數 |
+| `chunk_size` | **20,000 點** | 每次串流讀取點數（0.1 秒/段 @ 200kHz） |
+| `section_count` | **8** | WaveformAI 環形緩衝 section 數（總緩衝 0.8s，防 overrun） |
+| `display_window` | **100,000 點** | 即時波形顯示視窗點數（最近 0.5 秒 @ 200kHz） |
+| `diag_dir` | `data/diagnostics` | npz 儲存目錄 |
+
+---
+
+## AI 取樣架構
+
+### 即時監控模式（InstantAiCtrl 輪詢，10 kHz 標示）
+
+即時監控使用 `InstantAiCtrl` 逐次輪詢，非硬體連續採樣，實際取樣率受 OS 排程限制（約 100 Hz）。
+`config/thresholds.py` 中 `SAMPLING["ai_sample_rate"]` 標示為 **10,000 Hz**（文件標示用途，輪詢速率不變）。
+
+> ⚠️ **注意**：監控模式連線後**預設關閉**，需手動按「📡 監控開關」啟動。監控僅用於初步觀察，不做 PASS/FAIL 判斷。
+
+```
+USB-4716 InstantAiCtrl
+  │  每 10ms 呼叫 readDataF64(0, 5) 讀取 5 通道
+  ↓
+AIReader._instant_ai_loop()（背景執行緒）
+  │  存入 deque 滾動緩衝（10,000 點）
+  ↓
+UI callback → 波形顯示（20 Hz 刷新）+ 即時觀察面板（電壓/H/L/X 準位）
+```
+
+### 診斷模式（WaveformAiCtrl 單通道高速串流，v1.5 提升至 200 kS/s）
+
+診斷模式改用 `WaveformAiCtrl` 單通道高速採樣，達到硬體最高 200,000 Hz：
 
 ```
 USB-4716 硬體 ADC
-  │  10,000 Hz/通道（5 通道同步）
+  │  200,000 Hz/通道（單通道，WaveformAiCtrl）
   ↓ DMA
-硬體環形緩衝區（sectionLength=1000 × sectionCount=4）
-  │  每累積 1000 點觸發一次 DataReady 事件（約每 100ms）
-  ↓ EvtBufferedAiDataReady
-Python _on_data_ready() 回呼
-  │  批次取回 5000 個 F64（1000點 × 5通道），解交錯存入 deque
+硬體環形緩衝區（sectionLength=20000 × sectionCount=8 = 160,000 點 = 0.8s）
+  │  每累積 20,000 點觸發一次讀取（約每 100ms）
   ↓
-波形顯示緩衝區（deque，10,000 點 ≈ 1 秒資料）
+DiagnosticScanner.getDataF64(20000, timeout_ms=500)
+  │  chunk_callback → UI 即時繪圖（自動 decimation）
+  ↓
+npz 儲存（每通道 2,000,000 點 ≈ 7.6 MB float32）
 ```
 
 ### 效能對比
 
-| 項目 | v1.1（InstantAI 輪詢） | v1.2（WaveformAI 串流） |
+| 項目 | 即時監控（InstantAI） | 診斷模式（WaveformAI，v1.5） |
 |------|----------------------|----------------------|
-| AI 取樣架構 | 逐通道 USB 往返 | 硬體 DMA 串流 |
-| 實際 AI 取樣率 | ~40 Hz | **10,000 Hz/通道** |
-| GUI 刷新率 | 10 Hz | **20 Hz** |
-| 波形緩衝點數 | 1,000 點 | **10,000 點（~1 秒）** |
-| AI 通道量程 | 雙極性 ±5V / ±10V | 單極性 0~5V / 0~10V |
+| AI 取樣架構 | 逐次 USB 輪詢 | 硬體 DMA 串流（單通道） |
+| 實際 AI 取樣率 | ~100 Hz | **200,000 Hz/通道** |
+| 標示取樣率 | **10,000 Hz**（文件標示） | **200,000 Hz** |
+| 預設啟動 | **關閉**（手動按鈕啟動） | 按「🔬 高取樣診斷」啟動 |
+| PASS/FAIL 判斷 | **無**（僅顯示電壓/準位） | **有**（DiagAnalyzer 分析） |
+| GUI 刷新率 | 20 Hz | **10 Hz（每 0.1s 一段）** |
+| 波形緩衝點數 | 10,000 點 | **100,000 點（0.5 秒）** |
+| 繪圖降採樣 | 無 | **自動 decimation（≤ 5,000 點）** |
+| 硬體緩衝深度 | — | **160,000 點（0.8s），防 overrun** |
 
 ### 取樣參數設定（`config/thresholds.py`）
 
-| 參數 | 預設值 | 說明 |
+| 參數 | 值 | 說明 |
 |------|--------|------|
-| `ai_sample_rate` | 10,000 Hz | 每通道取樣率 |
-| `section_length` | 1,000 | 每 section 樣本數（每通道） |
-| `section_count` | 4 | 環形緩衝 section 數 |
+| `HW_MAX_SAMPLE_RATE` | **200,000 Hz** | 硬體最高取樣率（USB-4716 單通道上限） |
+| `ai_sample_rate` | **10,000 Hz** | InstantAI 監控標示取樣率（文件用，輪詢速率不變） |
+| `buffer_size` | **10,000** | 監控波形顯示緩衝點數 |
+| `section_length` | **20,000** | 診斷模式每 section 樣本數（0.1s @ 200kHz） |
+| `section_count` | **8** | 診斷模式環形緩衝 section 數（總緩衝 0.8s） |
 | `display_update_ms` | 50 ms | GUI 刷新間隔（20 Hz） |
-| `buffer_size` | 10,000 | 波形顯示緩衝點數 |
 
 ---
 
@@ -367,7 +532,8 @@ USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數（DI 
 **Q: WaveformAI 啟動失敗（錯誤碼 0xXXXX）**
 - 確認 USB-4716 韌體版本支援 WaveformAI（需 DAQNavi 3.x 以上）
 - 確認 `section_length × section_count` 不超過裝置硬體緩衝上限
-- 可嘗試降低 `ai_sample_rate`（如改為 5000）或減少 `section_count`
+- 系統會自動查詢 `AiFeatures.convertClockRange` 並 clamp 取樣率，通常不需手動調整
+- 若仍失敗，可嘗試降低 `DIAGNOSTIC["sample_rate"]`（如改為 100000）或減少 `section_count`
 
 **Q: Encoder RPM 讀值不穩定**
 - DI 軟體計數受系統負載影響，屬正常現象
@@ -394,7 +560,11 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | started_at | TEXT | 開始時間（ISO 8601） |
 | ended_at | TEXT | 結束時間 |
 | duration_s | REAL | 實際測試秒數 |
+| waveform_path | TEXT | npz 波形檔案路徑（FAIL 波形或診斷 npz） |
 | notes | TEXT | 備註 |
+| **session_type** | TEXT | **場次類型：`'test'`（一般檢測）或 `'diagnostic'`（高取樣診斷）** |
+| **diag_pass** | INTEGER | **診斷判定結果（1=PASS, 0=FAIL, -1=未分析）；僅診斷場次有效** |
+| **diag_ch_results** | TEXT | **各通道分析摘要（JSON 字串）；僅診斷場次有效** |
 
 ### `test_results`（統計結果）
 
@@ -426,3 +596,6 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | 1.1.0 | 2026-08-21 | 新增測試場次管理、SQLite 資料庫、歷史查詢視窗；流程改為連線後立即監控，手動觸發 5 分鐘計時檢測 |
 | 1.2.0 | 2026-08-21 | AI 讀取改用 WaveformAiCtrl 硬體串流（10 kHz/通道）；AI 量程改為單極性（Hall 0~5V、Encoder 0~10V）；GUI 刷新率提升至 20 Hz；波形緩衝擴大至 10,000 點 |
 | 1.3.0 | 2026-08-25 | 視窗高度限制 600px；移除 Encoder DI 數位波形子圖（只保留 Hall AI + Encoder AI 兩個子圖）；量測參數設定（PPR、電壓閾值）移至「開始檢測」對話框；波形滾輪縮放改為僅縮放 X 軸 |
+| 1.4.0 | 2026-08-27 | 新增高取樣率診斷模式：逐 CH 10kHz 採樣（10s/CH × 2 輪）、即時波形顯示、npz 存檔、DB 診斷場次記錄、歷史回放對話框；DB 新增 `session_type` 欄位區分診斷/測試場次 |
+| **1.5.0** | **2026-08-27** | **診斷模式取樣率提升至硬體最高 200 kS/s**：`sample_rate` 200,000 Hz、`chunk_size` 20,000 點、`section_count` 8（緩衝 0.8s）、`display_window` 100,000 點；新增 `HW_MAX_SAMPLE_RATE` 常數、`clamp_clock_rate()` 硬體上限自動偵測；`DiagnosticWidget` 加入繪圖 decimation（≤ 5,000 點）；回放對話框視窗/速度範圍更新；所有相依參數與測試斷言同步更新 |
+| **1.6.0** | **2026-08-27** | **監控預設關閉 + 高速波形診斷分析**：新增「📡 監控開關」toggle 按鈕（連線後預設關閉）；監控模式改為純即時觀察（10 kHz 標示，移除 PASS/FAIL 即時判斷）；新增 `DiagAnalyzer` 對高速波形做 H/L 比例、不定態比例、邊緣計數、頻率估算，診斷完成後輸出各通道與整體 PASS/FAIL；DB 新增 `diag_pass`、`diag_ch_results` 欄位；歷史查詢視窗顯示診斷 PASS/FAIL 與各通道摘要 |

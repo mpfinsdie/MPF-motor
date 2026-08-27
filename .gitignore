@@ -21,6 +21,7 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+test/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -218,3 +219,4 @@ __marimo__/
 .streamlit/secrets.toml
 *.xlsx
 *.exe
+*.npz

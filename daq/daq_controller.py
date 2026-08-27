@@ -19,7 +19,8 @@ DAQNavi SDK 結構：
 
 AI 取樣架構（WaveformAiCtrl）：
   硬體 ADC → DMA → 環形緩衝區 → DataReady 事件 → Python 回呼
-  取樣率：10,000 Hz/通道，每 0.1s 觸發一次 DataReady
+  取樣率：200,000 Hz/通道（單通道診斷模式），每 0.1s 觸發一次 DataReady
+  enter_diag_mode 會自動查詢 AiFeatures.convertClockRange 並 clamp 至硬體上限
 """
 
 import sys
@@ -28,6 +29,7 @@ import os
 # 嘗試匯入 DAQNavi SDK（Automation package）
 try:
     from Automation.BDaq.InstantDiCtrl import InstantDiCtrl
+    from Automation.BDaq.InstantAiCtrl import InstantAiCtrl
     from Automation.BDaq.WaveformAiCtrl import WaveformAiCtrl
     from Automation.BDaq import ErrorCode, ValueRange
     from Automation.BDaq.BDaqApi import BioFailed
@@ -52,10 +54,12 @@ class DAQController:
 
     def __init__(self, device_description: str = None):
         self.device_description = device_description or self.DEVICE_DESCRIPTION
-        self._wfm_ctrl  = None   # WaveformAiCtrl（高速 AI 串流）
-        self._di_ctrl   = None   # InstantDiCtrl（即時 DI）
-        self._connected = False
+        self._wfm_ctrl      = None   # WaveformAiCtrl（高速 AI 串流，診斷用）
+        self._instant_ai    = None   # InstantAiCtrl（即時 AI 輪詢，監控用）
+        self._di_ctrl       = None   # InstantDiCtrl（即時 DI）
+        self._connected     = False
         self._simulation_mode = not DAQNAVI_AVAILABLE
+        self._diag_mode     = False  # 診斷模式中（InstantAI 已釋放）
 
         if self._simulation_mode:
             print("[模擬模式] DAQNavi SDK 不可用，使用模擬資料")
@@ -82,10 +86,10 @@ class DAQController:
             return True, None
 
         try:
-            # 初始化 WaveformAiCtrl（高速 AI 串流）
-            self._wfm_ctrl = WaveformAiCtrl(self.device_description)
-            if self._wfm_ctrl is None:
-                raise RuntimeError("無法建立 WaveformAiCtrl")
+            # 初始化 InstantAiCtrl（即時 AI 輪詢，穩定可靠）
+            self._instant_ai = InstantAiCtrl(self.device_description)
+            if self._instant_ai is None:
+                raise RuntimeError("無法建立 InstantAiCtrl")
 
             # 初始化 DI 控制器（即時 DI）
             self._di_ctrl = InstantDiCtrl(self.device_description)
@@ -93,6 +97,7 @@ class DAQController:
                 raise RuntimeError("無法建立 DI 控制器")
 
             self._connected = True
+            self._diag_mode = False
             print(f"[DAQ] 已成功連線到裝置: {self.device_description}")
             return True, None
 
@@ -105,28 +110,215 @@ class DAQController:
         """釋放 DAQ 裝置資源"""
         if self._simulation_mode:
             self._connected = False
+            self._diag_mode = False
             print("[模擬模式] 已中斷連線")
             return
 
         try:
+            if self._instant_ai:
+                try:
+                    self._instant_ai.dispose()
+                except Exception:
+                    pass
+                self._instant_ai = None
             if self._wfm_ctrl:
                 try:
                     self._wfm_ctrl.stop()
                 except Exception:
                     pass
-                self._wfm_ctrl.dispose()
+                try:
+                    self._wfm_ctrl.dispose()
+                except Exception:
+                    pass
                 self._wfm_ctrl = None
             if self._di_ctrl:
-                self._di_ctrl.Dispose()
+                try:
+                    self._di_ctrl.Dispose()
+                except Exception:
+                    pass
                 self._di_ctrl = None
             self._connected = False
+            self._diag_mode = False
             print("[DAQ] 已釋放裝置資源")
         except Exception as e:
             print(f"[警告] 釋放資源時發生錯誤: {e}")
 
+    def get_instant_ai_ctrl(self):
+        """取得 InstantAiCtrl 實例（供 AIReader 使用）"""
+        return self._instant_ai
+
     def get_wfm_ai_ctrl(self):
-        """取得 WaveformAiCtrl 實例（供 AIReader 使用）"""
+        """取得 WaveformAiCtrl 實例（診斷用）"""
         return self._wfm_ctrl
+
+    @property
+    def is_diag_mode(self) -> bool:
+        """是否正在診斷模式（InstantAI 已釋放）"""
+        return self._diag_mode
+
+    def enter_diag_mode(self) -> bool:
+        """
+        進入診斷模式：釋放 InstantAiCtrl，建立 WaveformAiCtrl
+        診斷期間 InstantAI 輪詢必須先停止，才能呼叫此方法
+
+        自動查詢 AiFeatures.convertClockRange 取得硬體支援的取樣率上限，
+        並將設定值 clamp 在此範圍內，避免超規導致 prepare() 失敗。
+
+        Returns:
+            bool: 成功進入診斷模式
+        """
+        if self._simulation_mode:
+            self._diag_mode = True
+            print("[模擬模式] 進入診斷模式")
+            return True
+
+        if not self._connected:
+            print("[DAQ] 裝置未連線，無法進入診斷模式")
+            return False
+
+        try:
+            # 釋放 InstantAiCtrl（讓 WaveformAiCtrl 可獨占 AI 硬體）
+            if self._instant_ai:
+                try:
+                    self._instant_ai.dispose()
+                except Exception:
+                    pass
+                self._instant_ai = None
+                print("[DAQ] InstantAiCtrl 已釋放（診斷模式）")
+
+            # 建立 WaveformAiCtrl
+            self._wfm_ctrl = WaveformAiCtrl(self.device_description)
+            if self._wfm_ctrl is None:
+                raise RuntimeError("無法建立 WaveformAiCtrl")
+
+            # ── 查詢硬體取樣率上限並記錄 ────────────────────────────────────
+            self._hw_max_clock_rate = self._query_hw_max_clock_rate()
+
+            self._diag_mode = True
+            print(
+                f"[DAQ] WaveformAiCtrl 已建立，進入診斷模式 | "
+                f"硬體取樣率上限: {self._hw_max_clock_rate:,.0f} Hz"
+            )
+            return True
+
+        except Exception as e:
+            print(f"[DAQ] 進入診斷模式失敗: {e}")
+            self._diag_mode = False
+            return False
+
+    def _query_hw_max_clock_rate(self) -> float:
+        """
+        查詢 WaveformAiCtrl 硬體支援的最高取樣率（convertClockRange.max）
+
+        Returns:
+            float: 硬體最高取樣率 (Hz)；查詢失敗時回傳設定檔預設值
+        """
+        from config.thresholds import HW_MAX_SAMPLE_RATE
+        fallback = float(HW_MAX_SAMPLE_RATE)
+
+        if self._wfm_ctrl is None:
+            return fallback
+
+        try:
+            features = self._wfm_ctrl.features
+            clock_range = features.convertClockRange  # MathInterval
+            hw_max = float(clock_range.max)
+            hw_min = float(clock_range.min)
+            print(
+                f"[DAQ] 硬體取樣率範圍: {hw_min:,.0f} ~ {hw_max:,.0f} Hz"
+            )
+            return hw_max if hw_max > 0 else fallback
+        except Exception as e:
+            print(f"[DAQ] 查詢 convertClockRange 失敗（使用預設值 {fallback:,.0f} Hz）: {e}")
+            return fallback
+
+    def clamp_clock_rate(self, requested_rate: float) -> float:
+        """
+        將請求的取樣率 clamp 至硬體支援範圍內
+
+        Args:
+            requested_rate: 請求的取樣率 (Hz)
+
+        Returns:
+            float: clamp 後的取樣率 (Hz)
+        """
+        hw_max = getattr(self, "_hw_max_clock_rate", None)
+        if hw_max is None:
+            # 尚未查詢過（非診斷模式），直接回傳
+            return requested_rate
+
+        clamped = min(requested_rate, hw_max)
+        if clamped != requested_rate:
+            print(
+                f"[DAQ] 取樣率 clamp: {requested_rate:,.0f} → {clamped:,.0f} Hz"
+                f"（硬體上限 {hw_max:,.0f} Hz）"
+            )
+        return clamped
+
+    def exit_diag_mode(self) -> bool:
+        """
+        離開診斷模式：釋放 WaveformAiCtrl，重建 InstantAiCtrl
+        診斷完成後呼叫，恢復正常監控模式
+
+        Returns:
+            bool: 成功離開診斷模式
+        """
+        if self._simulation_mode:
+            self._diag_mode = False
+            print("[模擬模式] 離開診斷模式")
+            return True
+
+        if not self._connected:
+            self._diag_mode = False
+            return False
+
+        try:
+            # 釋放 WaveformAiCtrl
+            if self._wfm_ctrl:
+                try:
+                    self._wfm_ctrl.stop()
+                except Exception:
+                    pass
+                try:
+                    self._wfm_ctrl.dispose()
+                except Exception:
+                    pass
+                self._wfm_ctrl = None
+                print("[DAQ] WaveformAiCtrl 已釋放")
+
+            # 重建 InstantAiCtrl
+            self._instant_ai = InstantAiCtrl(self.device_description)
+            if self._instant_ai is None:
+                raise RuntimeError("無法重建 InstantAiCtrl")
+
+            self._diag_mode = False
+            print("[DAQ] InstantAiCtrl 已重建，離開診斷模式")
+            return True
+
+        except Exception as e:
+            print(f"[DAQ] 離開診斷模式失敗: {e}")
+            self._diag_mode = False
+            return False
+
+    def read_ai_channels(self, channel_start: int, channel_count: int) -> list:
+        """
+        即時讀取多個 AI 通道電壓值
+        Args:
+            channel_start: 起始通道編號
+            channel_count: 通道數量
+        Returns:
+            list: 各通道電壓值 [V]，讀取失敗時返回全 0
+        """
+        if self._simulation_mode or self._instant_ai is None:
+            return [0.0] * channel_count
+
+        try:
+            ret, data = self._instant_ai.readAny(channel_start, channel_count)
+            if DAQNAVI_AVAILABLE and BioFailed(ret):
+                return [0.0] * channel_count
+            return list(data) if data else [0.0] * channel_count
+        except Exception:
+            return [0.0] * channel_count
 
     def get_di_ctrl(self):
         """取得 DI 控制器實例"""

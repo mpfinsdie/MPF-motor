@@ -1,11 +1,11 @@
 """
-類比輸入讀取模組（WaveformAiCtrl 版）
-使用硬體緩衝串流模式取代 InstantAI 輪詢，大幅提升實際取樣率
+類比輸入讀取模組（InstantAiCtrl 輪詢版）
+使用 InstantAiCtrl.readDataF64() 定時輪詢，穩定可靠
 
 架構：
-  真實硬體：WaveformAiCtrl 事件驅動
-    硬體 ADC → DMA → 環形緩衝 → DataReady 事件 → _on_data_ready() → deque
-    取樣率：10,000 Hz/通道，每 0.1s 觸發一次（section_length=1000）
+  真實硬體：InstantAiCtrl 輪詢執行緒
+    背景執行緒每 10ms 呼叫 readDataF64(0, 5) → 取得 5 通道即時電壓
+    → 存入 deque → 觸發 UI callback
 
   模擬模式：保留舊的輪詢執行緒（無硬體時 UI 測試用）
     time.sleep 輪詢 → _simulate_ai() → deque
@@ -19,13 +19,6 @@ from collections import deque
 from typing import Callable, Optional
 
 from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, SAMPLING
-
-
-# ─── WaveformAI 事件參數物件 ────────────────────────────────────────────────────
-# DaqCtrlBase.addEventHandler 要求 userParam 必須有 .Sender 屬性
-class _EventParam:
-    """addEventHandler 所需的 userParam 物件"""
-    Sender = 0
 
 
 # ─── 通道定義 ───────────────────────────────────────────────────────────────────
@@ -45,12 +38,12 @@ _CHANNEL_NAMES = {
 
 class AIReader:
     """
-    類比輸入讀取器（WaveformAiCtrl 事件驅動版）
+    類比輸入讀取器（InstantAiCtrl 輪詢版）
 
     真實硬體模式：
-      - 呼叫 start() 後設定 WaveformAiCtrl 參數並啟動硬體串流
-      - SDK 每累積 section_length 個點觸發一次 EvtBufferedAiDataReady
-      - _on_data_ready() 批次取回資料並解交錯存入 deque
+      - 背景執行緒每 10ms 呼叫 InstantAiCtrl.readDataF64(0, 5)
+      - 取得 5 通道即時電壓後存入 deque 並觸發 UI callback
+      - 穩定連續，不受 WaveformAI cycles 限制
 
     模擬模式：
       - 啟動背景執行緒以 ~100 Hz 產生模擬波形資料
@@ -79,13 +72,10 @@ class AIReader:
         # 最新讀值
         self._latest: dict[int, float] = {ch: 0.0 for ch in _ALL_CHS}
 
-        # 執行緒控制（模擬模式用）
+        # 執行緒控制
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-
-        # WaveformAI 事件參數物件（真實硬體用）
-        self._event_param: Optional[_EventParam] = None
 
         # 資料更新回呼
         self._on_data_callback: Optional[Callable] = None
@@ -97,18 +87,15 @@ class AIReader:
     # ─── 啟動 / 停止 ────────────────────────────────────────────────────────────
 
     def start(self):
-        """啟動 AI 讀取（真實硬體：WaveformAI 事件驅動；模擬：輪詢執行緒）"""
+        """啟動 AI 讀取（真實硬體：InstantAI 輪詢；模擬：模擬輪詢）"""
         if self._running:
             return
-
-        # 必須在啟動執行緒/串流之前設為 True，
-        # 否則 _sim_loop() 的 while self._running 在執行緒啟動瞬間就會因 False 而立即結束
         self._running = True
 
         if self._daq.is_simulation:
             self._start_simulation()
         else:
-            self._start_waveform_ai()
+            self._start_instant_ai()
 
     def stop(self):
         """停止 AI 讀取"""
@@ -116,141 +103,91 @@ class AIReader:
             return
         self._running = False
 
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
         if self._daq.is_simulation:
-            # 停止模擬執行緒
-            if self._thread:
-                self._thread.join(timeout=2.0)
-                self._thread = None
             print("[AIReader] 模擬模式已停止")
         else:
-            # 停止 WaveformAI 串流
-            try:
-                wfm = self._daq.get_wfm_ai_ctrl()
-                if wfm is not None:
-                    wfm.stop()
-                    if self._event_param is not None:
-                        try:
-                            from Automation.BDaq import EventId
-                            wfm.removeEventHandler(
-                                EventId.EvtBufferedAiDataReady,
-                                self._on_data_ready,
-                                self._event_param
-                            )
-                        except Exception:
-                            pass
-            except Exception as e:
-                print(f"[AIReader] 停止 WaveformAI 時發生錯誤: {e}")
-            print("[AIReader] WaveformAI 已停止")
+            print("[AIReader] InstantAI 輪詢已停止")
 
-    # ─── 真實硬體：WaveformAiCtrl 設定與啟動 ────────────────────────────────────
+    # ─── 真實硬體：InstantAiCtrl 輪詢 ───────────────────────────────────────────
 
-    def _start_waveform_ai(self):
-        """設定並啟動 WaveformAiCtrl 硬體串流"""
+    def _start_instant_ai(self):
+        """啟動 InstantAI 輪詢執行緒"""
         try:
-            from Automation.BDaq import EventId, ValueRange
+            from Automation.BDaq import ValueRange
             from Automation.BDaq.BDaqApi import BioFailed
 
-            wfm = self._daq.get_wfm_ai_ctrl()
-            if wfm is None:
-                raise RuntimeError("WaveformAiCtrl 未初始化")
-
-            # ── 設定取樣參數 ──────────────────────────────────────────────────
-            conv = wfm.conversion
-            conv.channelStart = 0
-            conv.channelCount = _CH_COUNT                          # 5 通道 (ch0~ch4)
-            conv.clockRate    = float(SAMPLING["ai_sample_rate"])  # 10,000 Hz/通道
-
-            # ── 設定環形緩衝區 ────────────────────────────────────────────────
-            rec = wfm.record
-            rec.sectionLength = SAMPLING["section_length"]  # 1000 點/通道/section
-            rec.sectionCount  = SAMPLING["section_count"]   # 4 sections 環形緩衝
-            rec.cycles        = 0                           # 0 = 連續採集
+            ai = self._daq.get_instant_ai_ctrl()
+            if ai is None:
+                raise RuntimeError("InstantAiCtrl 未初始化")
 
             # ── 設定各通道量程 ────────────────────────────────────────────────
             # Hall ch0~2：0~5V 單極性（Hall 3.3V 訊號）
             for i in range(3):
-                wfm.channels[i].valueRange = ValueRange.V_0To5
+                ai.channels[i].valueRange = ValueRange.V_0To5
             # Encoder ch3~4：0~10V 單極性（Encoder 5V 訊號）
             for i in range(3, 5):
-                wfm.channels[i].valueRange = ValueRange.V_0To10
+                ai.channels[i].valueRange = ValueRange.V_0To10
 
-            # ── 註冊 DataReady 事件 ───────────────────────────────────────────
-            self._event_param = _EventParam()
-            wfm.addEventHandler(
-                EventId.EvtBufferedAiDataReady,
-                self._on_data_ready,
-                self._event_param
+            # ── 啟動輪詢執行緒 ────────────────────────────────────────────────
+            self._thread = threading.Thread(
+                target=self._instant_ai_loop, daemon=True
             )
-
-            # ── 準備並啟動 ────────────────────────────────────────────────────
-            ret = wfm.prepare()
-            if BioFailed(ret):
-                raise RuntimeError(f"WaveformAI prepare 失敗，錯誤碼: 0x{ret.value:X}")
-
-            ret = wfm.start()
-            if BioFailed(ret):
-                raise RuntimeError(f"WaveformAI start 失敗，錯誤碼: 0x{ret.value:X}")
+            self._thread.start()
 
             print(
-                f"[AIReader] WaveformAI 已啟動 | "
-                f"取樣率: {SAMPLING['ai_sample_rate']} Hz/ch | "
+                f"[AIReader] InstantAI 輪詢已啟動 | "
                 f"通道數: {_CH_COUNT} | "
-                f"DataReady 間隔: {SAMPLING['section_length'] / SAMPLING['ai_sample_rate'] * 1000:.0f} ms"
+                f"輪詢間隔: 10ms (100 Hz)"
             )
 
         except Exception as e:
-            print(f"[AIReader] WaveformAI 啟動失敗: {e}")
+            print(f"[AIReader] InstantAI 啟動失敗: {e}")
             raise
 
-    # ─── WaveformAI DataReady 事件回呼 ──────────────────────────────────────────
-
-    def _on_data_ready(self, sender, args, userParam):
+    def _instant_ai_loop(self):
         """
-        硬體每累積 section_length 個點觸發一次（約每 100ms）
-        資料格式（交錯）：[ch0_s0, ch1_s0, ch2_s0, ch3_s0, ch4_s0,
-                           ch0_s1, ch1_s1, ch2_s1, ch3_s1, ch4_s1, ...]
-        每次取回 section_length × ch_count = 1000 × 5 = 5000 個 F64 值
+        InstantAI 輪詢執行緒
+        每 10ms 讀取一次 5 通道電壓，存入 deque 並觸發 callback
         """
-        try:
-            from Automation.BDaq.BDaqApi import BioFailed
+        from Automation.BDaq.BDaqApi import BioFailed
 
-            wfm = self._daq.get_wfm_ai_ctrl()
-            if wfm is None:
-                return
+        ai = self._daq.get_instant_ai_ctrl()
+        interval = 0.01  # 10ms = 100 Hz
 
-            count = SAMPLING["section_length"] * _CH_COUNT  # 5000
+        while self._running:
+            t_start = time.time()
+            try:
+                ret, data = ai.readDataF64(0, _CH_COUNT)
 
-            ret, returned, data, *_ = wfm.getDataF64(count, timeout=500)
-            if BioFailed(ret) or returned == 0:
-                if BioFailed(ret):
-                    print(f"[AIReader] getDataF64 失敗，錯誤碼: 0x{ret.value:X}")
-                return
+                if BioFailed(ret) or not data:
+                    time.sleep(interval)
+                    continue
 
-            # 解交錯：將 1D 陣列重塑為 (樣本數, 通道數)
-            actual_samples = returned // _CH_COUNT
-            if actual_samples == 0:
-                return
+                t_now = time.time()
+                with self._lock:
+                    self._timestamps.append(t_now)
+                    for col, ch in enumerate(_ALL_CHS):
+                        val = float(data[col])
+                        self._buffers[ch].append(val)
+                        self._latest[ch] = val
 
-            arr = np.array(data[:actual_samples * _CH_COUNT], dtype=np.float64)
-            arr = arr.reshape(actual_samples, _CH_COUNT)
+                if self._on_data_callback:
+                    latest_snapshot = {ch: self._latest[ch] for ch in _ALL_CHS}
+                    self._on_data_callback(latest_snapshot)
 
-            # 產生對應時間戳（等間距，以當前時間為基準往前推算）
-            t_now = time.time()
-            dt = 1.0 / SAMPLING["ai_sample_rate"]
-            timestamps = [t_now - (actual_samples - 1 - i) * dt for i in range(actual_samples)]
+            except Exception as e:
+                if self._running:
+                    print(f"[AIReader] InstantAI 讀取錯誤: {e}")
 
-            with self._lock:
-                self._timestamps.extend(timestamps)
-                for col, ch in enumerate(_ALL_CHS):
-                    self._buffers[ch].extend(arr[:, col].tolist())
-                    self._latest[ch] = float(arr[-1, col])
-
-            if self._on_data_callback:
-                latest_snapshot = {ch: self._latest[ch] for ch in _ALL_CHS}
-                self._on_data_callback(latest_snapshot)
-
-        except Exception as e:
-            print(f"[AIReader] DataReady 回呼錯誤: {e}")
+            # 精確控制輪詢間隔
+            elapsed = time.time() - t_start
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     # ─── 模擬模式：輪詢執行緒 ───────────────────────────────────────────────────
 

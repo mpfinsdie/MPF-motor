@@ -1,6 +1,9 @@
 """
 測試結果面板
-顯示 Hall Sensor 與 Encoder 的即時測試結果、電壓值與狀態指示燈
+顯示 Hall Sensor 與 Encoder 的即時電壓值與 DI 狀態（僅供初步觀察）
+
+注意：即時監控模式不做 PASS/FAIL 判斷。
+      PASS/FAIL 診斷改由高速取樣（DiagnosticScanner + DiagAnalyzer）完成。
 """
 
 from PyQt5.QtWidgets import (
@@ -10,8 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 
-from logic.hall_analyzer import HallAnalysisResult, TestResult as HallTestResult, VoltageLevel as HallVoltageLevel
-from logic.encoder_analyzer import EncoderAnalysisResult, TestResult as EncTestResult, Direction
+from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS
 
 
 # ─── 樣式常數 ──────────────────────────────────────────────────────────────────
@@ -56,15 +58,20 @@ def make_status_label(text: str = "---") -> QLabel:
     return lbl
 
 
-class HallResultPanel(QGroupBox):
-    """三相 Hall Sensor 測試結果面板"""
+class HallLivePanel(QGroupBox):
+    """
+    三相 Hall Sensor 即時電壓顯示面板（僅供初步觀察）
+    不做 PASS/FAIL 判斷，僅顯示即時電壓與 H/L/X 準位
+    """
 
     PHASES = ["U", "V", "W"]
     PHASE_COLORS = {"U": "#FF4444", "V": "#44FF44", "W": "#4444FF"}
 
     def __init__(self, parent=None):
-        super().__init__("Hall Sensor (3.3V 系統)", parent)
+        super().__init__("Hall Sensor (3.3V 系統) — 即時觀察", parent)
         self.setStyleSheet(GROUP_STYLE)
+        self._vh_min = HALL_THRESHOLDS["vh_min"]
+        self._vl_max = HALL_THRESHOLDS["vl_max"]
         self._setup_ui()
 
     def _setup_ui(self):
@@ -72,7 +79,7 @@ class HallResultPanel(QGroupBox):
         grid.setSpacing(6)
 
         # 表頭
-        headers = ["相別", "電壓 (V)", "AI 準位", "DI 狀態", "一致性", "結果"]
+        headers = ["相別", "電壓 (V)", "AI 準位", "DI 狀態"]
         for col, h in enumerate(headers):
             lbl = make_label(h)
             lbl.setStyleSheet("color: #888888; font-size: 10px;")
@@ -82,14 +89,12 @@ class HallResultPanel(QGroupBox):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #444444;")
-        grid.addWidget(line, 1, 0, 1, 6)
+        grid.addWidget(line, 1, 0, 1, 4)
 
         # 各相資料列
         self._voltage_labels = {}
-        self._level_labels = {}
-        self._di_labels = {}
-        self._consistency_labels = {}
-        self._result_labels = {}
+        self._level_labels   = {}
+        self._di_labels      = {}
 
         for row, phase in enumerate(self.PHASES, start=2):
             color = self.PHASE_COLORS[phase]
@@ -107,81 +112,57 @@ class HallResultPanel(QGroupBox):
             self._di_labels[phase] = make_status_label()
             grid.addWidget(self._di_labels[phase], row, 3)
 
-            self._consistency_labels[phase] = make_status_label()
-            grid.addWidget(self._consistency_labels[phase], row, 4)
+        # 閾值提示
+        thresh_lbl = make_label(
+            f"閾值：VH ≥ {self._vh_min}V  VL ≤ {self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
+        )
+        thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
+        grid.addWidget(thresh_lbl, len(self.PHASES) + 2, 0, 1, 4)
 
-            self._result_labels[phase] = make_status_label()
-            grid.addWidget(self._result_labels[phase], row, 5)
+    def update_voltages(self, hall_voltages: dict, di_states: dict = None):
+        """
+        更新即時電壓顯示
 
-        # 整體結果
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.HLine)
-        line2.setStyleSheet("color: #444444;")
-        grid.addWidget(line2, len(self.PHASES) + 2, 0, 1, 6)
+        Args:
+            hall_voltages: {"U": v, "V": v, "W": v}
+            di_states:     {"U": bool, "V": bool, "W": bool}（可選）
+        """
+        for phase in self.PHASES:
+            v = hall_voltages.get(phase, 0.0)
+            self._voltage_labels[phase].setText(f"{v:.3f} V")
 
-        overall_lbl = make_label("整體結果")
-        overall_lbl.setStyleSheet("color: #CCCCCC; font-weight: bold;")
-        grid.addWidget(overall_lbl, len(self.PHASES) + 3, 0, 1, 4)
-
-        self._overall_label = make_status_label()
-        self._overall_label.setStyleSheet(STYLE_UNKNOWN)
-        grid.addWidget(self._overall_label, len(self.PHASES) + 3, 4, 1, 2)
-
-    def update_result(self, result: HallAnalysisResult):
-        """更新顯示結果"""
-        for phase, ch_result in result.channels.items():
-            # 電壓
-            self._voltage_labels[phase].setText(f"{ch_result.voltage:.3f} V")
-
-            # AI 準位
-            level = ch_result.voltage_level
-            if level == HallVoltageLevel.HIGH:
+            # AI 準位（僅顯示，不判斷 PASS/FAIL）
+            if v >= self._vh_min:
                 self._level_labels[phase].setText("H")
                 self._level_labels[phase].setStyleSheet(STYLE_HIGH)
-            elif level == HallVoltageLevel.LOW:
+            elif v <= self._vl_max:
                 self._level_labels[phase].setText("L")
                 self._level_labels[phase].setStyleSheet(STYLE_LOW)
             else:
                 self._level_labels[phase].setText("X")
                 self._level_labels[phase].setStyleSheet(STYLE_UNDEF)
 
-            # DI 狀態
-            di_text = "H" if ch_result.di_state else "L"
-            di_style = STYLE_HIGH if ch_result.di_state else STYLE_LOW
-            self._di_labels[phase].setText(di_text)
-            self._di_labels[phase].setStyleSheet(di_style)
-
-            # 一致性
-            if ch_result.consistency:
-                self._consistency_labels[phase].setText("✓")
-                self._consistency_labels[phase].setStyleSheet(STYLE_PASS)
+            # DI 狀態（可選）
+            if di_states is not None:
+                di_val = di_states.get(phase, False)
+                self._di_labels[phase].setText("H" if di_val else "L")
+                self._di_labels[phase].setStyleSheet(STYLE_HIGH if di_val else STYLE_LOW)
             else:
-                self._consistency_labels[phase].setText("✗")
-                self._consistency_labels[phase].setStyleSheet(STYLE_FAIL)
-
-            # 結果
-            if ch_result.overall_result == HallTestResult.PASS:
-                self._result_labels[phase].setText("PASS")
-                self._result_labels[phase].setStyleSheet(STYLE_PASS)
-            else:
-                self._result_labels[phase].setText("FAIL")
-                self._result_labels[phase].setStyleSheet(STYLE_FAIL)
-
-        # 整體結果
-        if result.overall_result == HallTestResult.PASS:
-            self._overall_label.setText("PASS")
-            self._overall_label.setStyleSheet(STYLE_PASS)
-        else:
-            self._overall_label.setText("FAIL")
-            self._overall_label.setStyleSheet(STYLE_FAIL)
+                self._di_labels[phase].setText("---")
+                self._di_labels[phase].setStyleSheet(STYLE_UNKNOWN)
 
 
-class EncoderResultPanel(QGroupBox):
-    """Encoder 測試結果面板"""
+class EncoderLivePanel(QGroupBox):
+    """
+    Encoder 即時電壓顯示面板（僅供初步觀察）
+    不做 PASS/FAIL 判斷，僅顯示即時電壓、DI 狀態與 RPM
+    """
 
     def __init__(self, parent=None):
-        super().__init__("Encoder (5V 系統)", parent)
+        super().__init__("Encoder (5V 系統) — 即時觀察", parent)
         self.setStyleSheet(GROUP_STYLE)
+        self._vh_min = ENCODER_THRESHOLDS["vh_min"]
+        self._vl_max = ENCODER_THRESHOLDS["vl_max"]
         self._setup_ui()
 
     def _setup_ui(self):
@@ -192,7 +173,7 @@ class EncoderResultPanel(QGroupBox):
         grid = QGridLayout()
         grid.setSpacing(6)
 
-        headers = ["通道", "電壓 (V)", "AI 準位", "DI 狀態", "一致性", "結果"]
+        headers = ["通道", "電壓 (V)", "AI 準位", "DI 狀態"]
         for col, h in enumerate(headers):
             lbl = make_label(h)
             lbl.setStyleSheet("color: #888888; font-size: 10px;")
@@ -201,14 +182,12 @@ class EncoderResultPanel(QGroupBox):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #444444;")
-        grid.addWidget(line, 1, 0, 1, 6)
+        grid.addWidget(line, 1, 0, 1, 4)
 
         CHANNEL_COLORS = {"A": "#FFAA00", "B": "#AA00FF"}
         self._voltage_labels = {}
-        self._level_labels = {}
-        self._di_labels = {}
-        self._consistency_labels = {}
-        self._result_labels = {}
+        self._level_labels   = {}
+        self._di_labels      = {}
 
         for row, ch in enumerate(["A", "B"], start=2):
             color = CHANNEL_COLORS[ch]
@@ -226,25 +205,13 @@ class EncoderResultPanel(QGroupBox):
             self._di_labels[ch] = make_status_label()
             grid.addWidget(self._di_labels[ch], row, 3)
 
-            self._consistency_labels[ch] = make_status_label()
-            grid.addWidget(self._consistency_labels[ch], row, 4)
-
-            self._result_labels[ch] = make_status_label()
-            grid.addWidget(self._result_labels[ch], row, 5)
-
         main_layout.addLayout(grid)
 
-        # ── 動態資訊 ──────────────────────────────────────────────────────────
+        # ── 動態資訊（RPM / 計數 / 位置）────────────────────────────────────
         info_layout = QGridLayout()
         info_layout.setSpacing(8)
 
-        info_items = [
-            ("計數", "count"),
-            ("方向", "direction"),
-            ("轉速", "rpm"),
-            ("位置", "position"),
-        ]
-
+        info_items = [("計數", "count"), ("轉速", "rpm"), ("位置", "position")]
         self._info_labels = {}
         for col, (label_text, key) in enumerate(info_items):
             lbl = make_label(label_text)
@@ -258,70 +225,56 @@ class EncoderResultPanel(QGroupBox):
 
         main_layout.addLayout(info_layout)
 
-        # ── 整體結果 ──────────────────────────────────────────────────────────
-        result_layout = QHBoxLayout()
-        result_layout.addWidget(make_label("整體結果："))
-        self._overall_label = make_status_label()
-        result_layout.addWidget(self._overall_label)
-        result_layout.addStretch()
-        main_layout.addLayout(result_layout)
+        # 閾值提示
+        thresh_lbl = make_label(
+            f"閾值：VH ≥ {self._vh_min}V  VL ≤ {self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
+        )
+        thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
+        main_layout.addWidget(thresh_lbl)
 
-    def update_result(self, result: EncoderAnalysisResult):
-        """更新顯示結果"""
-        from logic.encoder_analyzer import VoltageLevel as EncVoltageLevel
+    def update_voltages(self, enc_voltages: dict, enc_state: dict = None):
+        """
+        更新即時電壓顯示
 
-        for ch, ch_result in result.channels.items():
-            self._voltage_labels[ch].setText(f"{ch_result.voltage:.3f} V")
+        Args:
+            enc_voltages: {"A": v, "B": v}
+            enc_state:    {"A": bool, "B": bool, "count": int, "rpm": float, "position_deg": float}
+        """
+        for ch in ["A", "B"]:
+            v = enc_voltages.get(ch, 0.0)
+            self._voltage_labels[ch].setText(f"{v:.3f} V")
 
-            level = ch_result.voltage_level
-            if level == EncVoltageLevel.HIGH:
+            if v >= self._vh_min:
                 self._level_labels[ch].setText("H")
                 self._level_labels[ch].setStyleSheet(STYLE_HIGH)
-            elif level == EncVoltageLevel.LOW:
+            elif v <= self._vl_max:
                 self._level_labels[ch].setText("L")
                 self._level_labels[ch].setStyleSheet(STYLE_LOW)
             else:
                 self._level_labels[ch].setText("X")
                 self._level_labels[ch].setStyleSheet(STYLE_UNDEF)
 
-            di_text = "H" if ch_result.di_state else "L"
-            di_style = STYLE_HIGH if ch_result.di_state else STYLE_LOW
-            self._di_labels[ch].setText(di_text)
-            self._di_labels[ch].setStyleSheet(di_style)
-
-            if ch_result.consistency:
-                self._consistency_labels[ch].setText("✓")
-                self._consistency_labels[ch].setStyleSheet(STYLE_PASS)
+            if enc_state is not None:
+                di_val = enc_state.get(ch, False)
+                self._di_labels[ch].setText("H" if di_val else "L")
+                self._di_labels[ch].setStyleSheet(STYLE_HIGH if di_val else STYLE_LOW)
             else:
-                self._consistency_labels[ch].setText("✗")
-                self._consistency_labels[ch].setStyleSheet(STYLE_FAIL)
+                self._di_labels[ch].setText("---")
+                self._di_labels[ch].setStyleSheet(STYLE_UNKNOWN)
 
-            if ch_result.overall_result == EncTestResult.PASS:
-                self._result_labels[ch].setText("PASS")
-                self._result_labels[ch].setStyleSheet(STYLE_PASS)
-            else:
-                self._result_labels[ch].setText("FAIL")
-                self._result_labels[ch].setStyleSheet(STYLE_FAIL)
-
-        # 動態資訊
-        self._info_labels["count"].setText(str(result.count))
-        self._info_labels["direction"].setText(result.direction.value)
-        self._info_labels["rpm"].setText(f"{abs(result.rpm):.1f} RPM")
-        self._info_labels["position"].setText(f"{result.position_deg:.1f}°")
-
-        # 整體結果
-        if result.overall_result == EncTestResult.PASS:
-            self._overall_label.setText("PASS")
-            self._overall_label.setStyleSheet(STYLE_PASS)
-        else:
-            self._overall_label.setText("FAIL")
-            self._overall_label.setStyleSheet(STYLE_FAIL)
+        if enc_state is not None:
+            self._info_labels["count"].setText(str(enc_state.get("count", 0)))
+            rpm = enc_state.get("rpm", 0.0)
+            self._info_labels["rpm"].setText(f"{abs(rpm):.1f} RPM")
+            pos = enc_state.get("position_deg", 0.0)
+            self._info_labels["position"].setText(f"{pos:.1f}°")
 
 
 class ResultPanel(QWidget):
     """
-    完整測試結果面板
+    即時電壓顯示面板（監控模式，僅供初步觀察）
     包含 Hall Sensor 與 Encoder 兩個子面板
+    注意：不做 PASS/FAIL 判斷，診斷請使用「高取樣診斷」功能
     """
 
     def __init__(self, parent=None):
@@ -334,26 +287,43 @@ class ResultPanel(QWidget):
         layout.setSpacing(8)
 
         # 標題
-        title = QLabel("測試結果")
+        title = QLabel("即時觀察（10 kHz 監控）")
         title.setFont(QFont("Arial", 11, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #CCCCCC; padding: 4px;")
         layout.addWidget(title)
 
-        # Hall 結果面板
-        self._hall_panel = HallResultPanel()
+        # 說明標籤
+        note_lbl = QLabel("⚠ 即時監控僅供初步觀察，不做 PASS/FAIL 判斷\n   診斷請使用「🔬 高取樣診斷」按鈕")
+        note_lbl.setStyleSheet("color: #888844; font-size: 10px; padding: 2px 4px;")
+        note_lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(note_lbl)
+
+        # Hall 即時面板
+        self._hall_panel = HallLivePanel()
         layout.addWidget(self._hall_panel)
 
-        # Encoder 結果面板
-        self._enc_panel = EncoderResultPanel()
+        # Encoder 即時面板
+        self._enc_panel = EncoderLivePanel()
         layout.addWidget(self._enc_panel)
 
         layout.addStretch()
 
-    def update_hall(self, result: HallAnalysisResult):
-        """更新 Hall Sensor 結果"""
-        self._hall_panel.update_result(result)
+    def update_live_voltages(
+        self,
+        hall_voltages: dict,
+        enc_voltages: dict,
+        enc_state: dict = None,
+        di_states: dict = None
+    ):
+        """
+        更新即時電壓顯示（由 _update_analysis 每 50ms 呼叫）
 
-    def update_encoder(self, result: EncoderAnalysisResult):
-        """更新 Encoder 結果"""
-        self._enc_panel.update_result(result)
+        Args:
+            hall_voltages: {"U": v, "V": v, "W": v}
+            enc_voltages:  {"A": v, "B": v}
+            enc_state:     {"A": bool, "B": bool, "count": int, "rpm": float, "position_deg": float}
+            di_states:     {"U": bool, "V": bool, "W": bool}（Hall DI 狀態，可選）
+        """
+        self._hall_panel.update_voltages(hall_voltages, di_states)
+        self._enc_panel.update_voltages(enc_voltages, enc_state)
