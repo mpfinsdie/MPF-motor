@@ -77,8 +77,9 @@ DIAGNOSTIC = {
     "chunk_size":        20_000,  # 每次分段讀取點數
                                   # = 20000 / 200000 = 0.1s/段（維持 10 Hz 回呼頻率）
                                   # 避免 200kHz 下回呼過於頻繁造成 UI 卡頓
-    "section_count":     8,       # WaveformAI 環形緩衝 section 數
-                                  # 總緩衝 = 8 × 20000 = 160,000 點（0.8s），防 overrun
+    "section_count":     8,       # WaveformAI 環形緩衝 section 數（僅供模擬模式參考）
+                                  # 真實硬體模式：rec.sectionCount = 0（無限循環），
+                                  # 此值不再傳入 WaveformAiCtrl，避免硬體在 8 段後自動停止
     "display_window":    100_000, # 即時波形顯示視窗點數（200kHz × 0.5s = 100,000 點）
                                   # 繪圖時自動 decimation 降採樣，維持 UI 流暢
     "channels": [                 # 診斷通道清單（依序輪流採樣）

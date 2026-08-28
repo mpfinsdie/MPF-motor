@@ -297,11 +297,13 @@ class DiagnosticScanner:
             conv.channelCount = 1
             conv.clockRate    = actual_rate
 
-            # ── 設定 record（環形緩衝）──────────────────────────────────────
+            # ── 設定 record（環形緩衝，Cyclic 模式）────────────────────────
             # sectionLength 需與 chunk_size 對齊，確保 getDataF64 每次能取到完整段
+            # sectionCount = 0 → 無限循環（Cyclic）模式，由程式碼的 chunks_needed
+            # 迴圈控制結束時機，避免硬體在 sectionCount 段後自動停止（WarningFuncStopped）
             rec = wfm.record
             rec.sectionLength = self._chunk_size   # 20,000 點/段（0.1s @ 200kHz）
-            rec.sectionCount  = self._section_count  # 8 段（0.8s 總緩衝，防 overrun）
+            rec.sectionCount  = 0                  # 0 = 無限循環，不自動停止
 
             # ── prepare & start ──────────────────────────────────────────────
             err = wfm.prepare()
