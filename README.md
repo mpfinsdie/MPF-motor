@@ -32,7 +32,7 @@
 - 視窗高度固定 600px，波形圖滾輪縮放僅作用於 X 軸（時間軸）
 - **監控預設關閉**：連線後不自動啟動 AI/DI 輪詢，需手動按「📡 監控開關」啟動
 
-### 🔬 高取樣率診斷模式（v1.4 新增，v1.5 提升至 200 kS/s，v1.6 新增波形診斷分析）
+### 🔬 高取樣率診斷模式（v1.4 新增，v1.5 提升至 200 kS/s，v1.6 新增波形診斷分析，v1.7 新增比值交叉驗證）
 - **獨立診斷模式**：另加「🔬 高取樣診斷」按鈕啟動（監控模式與診斷模式互斥）
 - **逐通道高速採樣**：一次專注 1 個 AI 通道，以 **200,000 Hz**（硬體最高）連續採樣 **10 秒**
 - **輪流掃描**：CH0（Hall U）→ CH1（Hall V）→ CH2（Hall W）→ CH3（Encoder A）→ CH4（Encoder B），跑滿 **2 輪**後自動結束
@@ -44,6 +44,8 @@
 - **🆕 診斷結果顯示**：診斷完成對話框顯示各通道分析結果（H/L/X 比例、邊緣數、頻率、PASS/FAIL）
 - **歷史記錄**：診斷場次寫入 DB（含 `diag_pass` 與各通道摘要 JSON），可在「📋 歷史記錄」中查看診斷 PASS/FAIL 與各通道結果，並以「🔬 回看診斷」按鈕回放波形
 - **硬體上限自動偵測**：`enter_diag_mode()` 自動查詢 `AiFeatures.convertClockRange`，將取樣率 clamp 至硬體實際上限，避免超規導致 `prepare()` 失敗
+- **🆕 Hall/Encoder 脈波比值交叉驗證**：每相 Hall（U/V/W）單獨與 Encoder 平均頻率做比值檢查，理論比值 = PPR / Hall週期/轉（例：512/90 ≈ 5.689），無論轉速多少比值應為常數；可偵測單相 Hall 掉脈波、Encoder 掉脈波、某相無訊號等異常
+- **🆕 馬達規格可設定**：Hall 每轉週期數、Encoder 解析度（bits）、PPR、比值容差均可在「⚙ 參數設置」對話框調整，適應不同馬達規格
 
 ### 測試場次管理（v1.1 新增）
 - 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 10 kHz 即時觀察，確認訊號後再手動觸發檢測
@@ -227,7 +229,10 @@ python main.py
 - **測試時長**：1 ~ 60 分鐘（預設 5 分鐘）
 
 **量測參數設定**（每次測試前確認）
-- **Encoder PPR**：依實際 Encoder 規格設定（預設 1000 PPR）
+- **Hall 週期/轉**：Hall Sensor 每相每轉產生的 H-L 週期數（預設 90，依實際馬達規格修改）
+- **Encoder 解析度**：Encoder 解析度位元數（預設 11 bits = 2048 counts/轉，自動帶出 PPR）
+- **Encoder PPR**：每相每轉脈波數（預設 512 = 2^11 / 4，可手動覆蓋）
+- **比值容差**：Hall/Encoder 脈波比值交叉驗證容差（預設 ±15%）
 - **Hall VH_min / VL_max**：Hall Sensor 電壓閾值
 - **Encoder VH_min / VL_max**：Encoder 電壓閾值
 
@@ -398,8 +403,16 @@ pyqtgraph 即時波形更新（每 0.1 秒，繪圖點數 ≤ 5,000）
     "channel_names":  np.array(["Hall U", "Hall V", "Hall W", "Encoder A", "Encoder B"]),
     "channel_nums":   np.array([0, 1, 2, 3, 4], dtype=int32),
     "diag_type":      np.array(["sequential_ch"]),  # 識別標記
+
+    # ── v1.7 新增：馬達規格參數（供回放分析時還原比值交叉驗證設定）────────────
+    "hall_pulses_per_rev": np.array([90],   dtype=int32),   # Hall 每相每轉週期數
+    "ppr":                 np.array([512],  dtype=int32),   # Encoder 每相每轉脈波數
+    "resolution_bits":     np.array([11],   dtype=int32),   # Encoder 解析度位元數
+    "ratio_tolerance":     np.array([0.15], dtype=float32), # 比值容差（±15%）
 }
 ```
+
+> **舊格式相容性**：不含上述 v1.7 新增欄位的舊 npz 檔案，回放分析時會自動 fallback 至 `config/thresholds.py` 的當前預設值。
 
 ### 診斷設定（`config/thresholds.py`）
 
@@ -413,6 +426,111 @@ pyqtgraph 即時波形更新（每 0.1 秒，繪圖點數 ≤ 5,000）
 | `section_count` | **8** | WaveformAI 環形緩衝 section 數（總緩衝 0.8s，防 overrun） |
 | `display_window` | **100,000 點** | 即時波形顯示視窗點數（最近 0.5 秒 @ 200kHz） |
 | `diag_dir` | `data/diagnostics` | npz 儲存目錄 |
+
+**診斷分析參數（`DIAGNOSTIC["analysis"]`）**
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| `hl_ratio_min` | 0.05 | H 準位樣本比例下限（低於此值視為訊號異常） |
+| `hl_ratio_max` | 0.95 | H 準位樣本比例上限（高於此值視為訊號異常） |
+| `undefined_ratio_max` | 0.20 | 不定態樣本比例上限（超過 20% 視為 FAIL） |
+| `min_edges_hall` | 10 | Hall 通道最少邊緣數（10 秒內） |
+| `min_edges_encoder` | 20 | Encoder 通道最少邊緣數（10 秒內） |
+| `round_freq_diff_max` | 0.20 | 輪次間頻率差異上限（比例） |
+| `enable_ratio_check` | `True` | 是否啟用 Hall/Encoder 比值交叉驗證 |
+| `ratio_tolerance` | **0.15** | 比值容差（±15%），超出則 FAIL |
+
+**馬達規格參數（可在「⚙ 參數設置」對話框調整）**
+
+| 參數 | 預設值 | 說明 |
+|------|--------|------|
+| `HALL_THRESHOLDS["hall_pulses_per_rev"]` | **90** | Hall Sensor 每相每轉 H-L 週期數 |
+| `ENCODER_THRESHOLDS["resolution_bits"]` | **11** | Encoder 解析度位元數（11 bits = 2048 counts/轉） |
+| `ENCODER_THRESHOLDS["ppr"]` | **512** | Encoder 每相每轉脈波數（= 2^11 / 4，四倍頻正交解碼） |
+
+---
+
+## Hall/Encoder 脈波比值交叉驗證（v1.7 新增）
+
+### 設計原理
+
+Hall Sensor 與 Encoder 安裝在同一轉軸上，因此兩者的脈波頻率比值為固定常數，**與轉速無關**：
+
+```
+理論比值 = Encoder PPR / Hall 每轉週期數
+         = 512 / 90
+         ≈ 5.689
+```
+
+無論馬達轉速多少，實測的 `f_encoder / f_hall_相` 都應落在理論比值 ±容差內。
+
+### 異常偵測邏輯
+
+| 現象 | 實測比值 | 判斷 |
+|------|----------|------|
+| 某相 Hall 掉脈波（頻率偏低） | **偏高**（> 理論 × (1+容差)） | ✘ FAIL：Hall X相 可能掉脈波 |
+| Encoder 掉脈波（頻率偏低） | **偏低**（< 理論 × (1-容差)） | ✘ FAIL：Encoder 可能掉脈波 |
+| 某相 Hall 無訊號（頻率 = 0） | 無法計算（除以零） | ✘ FAIL：Hall X相 頻率為 0 |
+| Encoder 無訊號（頻率 = 0） | 0 | ✘ FAIL：Encoder 頻率為 0 |
+| 正常 | 落在 [理論×(1-容差), 理論×(1+容差)] | ✔ PASS |
+
+### 每相獨立驗證
+
+每一相 Hall（U/V/W）都**單獨**與 Encoder 平均頻率（A/B 兩通道平均）做比值檢查，可精確定位到哪一相異常：
+
+```
+Hall U 頻率 vs Encoder 平均頻率 → 比值 → PASS/FAIL
+Hall V 頻率 vs Encoder 平均頻率 → 比值 → PASS/FAIL
+Hall W 頻率 vs Encoder 平均頻率 → 比值 → PASS/FAIL
+```
+
+### 計算範例
+
+```
+馬達規格：Hall 90 週期/轉，Encoder 11 bits（PPR = 512）
+理論比值 = 512 / 90 = 5.689
+容差 ±15%：允許範圍 [4.836, 6.542]
+
+轉速 60 RPM（1 rps）：
+  Hall U 頻率 = 90 × 1 = 90 Hz
+  Encoder 頻率 = 512 × 1 = 512 Hz
+  實測比值 = 512 / 90 = 5.689 → PASS ✔
+
+轉速 300 RPM（5 rps）：
+  Hall U 頻率 = 90 × 5 = 450 Hz
+  Encoder 頻率 = 512 × 5 = 2560 Hz
+  實測比值 = 2560 / 450 = 5.689 → PASS ✔（比值不隨轉速改變）
+
+Hall V 掉脈波（頻率只有正常的 50%）：
+  Hall V 頻率 = 45 Hz（異常）
+  Encoder 頻率 = 512 Hz（正常）
+  實測比值 = 512 / 45 = 11.378 → 超出上限 6.542 → FAIL ✘
+  提示：Hall V 可能掉脈波（比值偏高）
+```
+
+### 參數設定
+
+在「⚙ 參數設置」對話框可調整以下參數（適應不同馬達）：
+
+| 參數 | 說明 | 預設值 |
+|------|------|--------|
+| **Hall 週期/轉** | Hall Sensor 每相每轉 H-L 週期數 | 90 |
+| **Encoder 解析度** | Encoder 解析度位元數（自動帶出 PPR） | 11 bits |
+| **Encoder PPR** | 每相每轉脈波數（= 2^bits / 4） | 512 |
+| **比值容差** | 允許偏差比例（±%） | 0.15（±15%） |
+
+> 💡 **提示**：對話框中的「理論比值」標籤會即時顯示當前設定的理論比值與允許範圍，方便確認設定是否正確。
+
+### 模擬模式相容性
+
+模擬模式下，`DiagnosticScanner._generate_sim_chunk()` 會從 `HALL_THRESHOLDS["hall_pulses_per_rev"]` 與 `ENCODER_THRESHOLDS["ppr"]` 動態計算模擬頻率，確保模擬比值與理論比值一致，避免模擬模式恆為 FAIL：
+
+```python
+sim_rps = 1.0  # 模擬轉速（1 rps = 60 RPM）
+hall_base_freq = hall_pulses_per_rev × sim_rps  # 例：90 Hz
+enc_base_freq  = enc_ppr × sim_rps              # 例：512 Hz
+# 比值 = 512 / 90 ≈ 5.689（與理論比值一致）
+```
 
 ---
 
@@ -599,3 +717,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | 1.4.0 | 2026-08-27 | 新增高取樣率診斷模式：逐 CH 10kHz 採樣（10s/CH × 2 輪）、即時波形顯示、npz 存檔、DB 診斷場次記錄、歷史回放對話框；DB 新增 `session_type` 欄位區分診斷/測試場次 |
 | **1.5.0** | **2026-08-27** | **診斷模式取樣率提升至硬體最高 200 kS/s**：`sample_rate` 200,000 Hz、`chunk_size` 20,000 點、`section_count` 8（緩衝 0.8s）、`display_window` 100,000 點；新增 `HW_MAX_SAMPLE_RATE` 常數、`clamp_clock_rate()` 硬體上限自動偵測；`DiagnosticWidget` 加入繪圖 decimation（≤ 5,000 點）；回放對話框視窗/速度範圍更新；所有相依參數與測試斷言同步更新 |
 | **1.6.0** | **2026-08-27** | **監控預設關閉 + 高速波形診斷分析**：新增「📡 監控開關」toggle 按鈕（連線後預設關閉）；監控模式改為純即時觀察（10 kHz 標示，移除 PASS/FAIL 即時判斷）；新增 `DiagAnalyzer` 對高速波形做 H/L 比例、不定態比例、邊緣計數、頻率估算，診斷完成後輸出各通道與整體 PASS/FAIL；DB 新增 `diag_pass`、`diag_ch_results` 欄位；歷史查詢視窗顯示診斷 PASS/FAIL 與各通道摘要 |
+| **1.7.0** | **2026-09-02** | **Hall/Encoder 脈波比值交叉驗證 + 馬達規格可設定**：新增 `RatioCheckResult` 資料類別與 `DiagAnalyzer._cross_validate_ratio()` 方法，對每相 Hall（U/V/W）單獨與 Encoder 平均頻率做比值檢查（理論比值 = PPR / Hall週期/轉 = 512/90 ≈ 5.689），可偵測單相掉脈波、Encoder 掉脈波、無訊號等異常；`HALL_THRESHOLDS` 新增 `hall_pulses_per_rev=90`；`ENCODER_THRESHOLDS` 新增 `resolution_bits=11`、`ppr` 改為 512；`DIAGNOSTIC.analysis` 新增 `enable_ratio_check=True`、`ratio_tolerance=0.15`；`SessionStartDialog` 新增 Hall 週期/轉、Encoder 解析度 bits、比值容差三個設定欄位（bits 變更自動帶出 PPR 建議值，即時顯示理論比值與允許範圍）；npz metadata 新增四個馬達規格欄位供回放分析還原；模擬模式頻率改為動態計算確保比值正確 |

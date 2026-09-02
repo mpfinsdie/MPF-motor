@@ -2,7 +2,8 @@
 主視窗模組（重構版）
 整合波形顯示、測試結果面板與控制按鈕
 流程：連線後監控預設關閉 → 手動按「監控開關」啟動即時觀察（10 kHz 標示）
-      → 操作員確認穩定 → 開始高取樣診斷（200kHz 高速採樣 5CH × 2輪）
+      → 操作員按「參數設置」設定量測參數（PPR、閾值）並輸入序號/操作員
+      → 按「高取樣診斷」開始高速採樣（200kHz 高速採樣 5CH × 2輪）
       → 診斷完成後自動分析 PASS/FAIL，存成 npz 並寫入 DB 歷史記錄
 
 即時監控模式（預設關閉）：
@@ -36,8 +37,6 @@ from daq.ai_reader import AIReader
 from daq.di_reader import DIReader
 from logic.hall_analyzer import HallAnalyzer
 from logic.encoder_analyzer import EncoderAnalyzer
-from logic.test_session import TestSession, SessionState
-from logic.waveform_recorder import WaveformRecorder
 from logic.diagnostic_scanner import DiagnosticScanner
 from logic.diag_analyzer import DiagAnalyzer
 from ui.waveform_widget import WaveformWidget
@@ -116,7 +115,6 @@ MAIN_STYLE = """
 
 BTN_START_STYLE      = "background-color: #2D8E2D; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 100px;"
 BTN_STOP_STYLE       = "background-color: #8E2D2D; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 100px;"
-BTN_EARLY_STYLE      = "background-color: #7A5A00; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 100px;"
 BTN_DIAG_STYLE       = "background-color: #2D5A8E; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 110px;"
 BTN_DIAG_STOP_STYLE  = "background-color: #8E2D5A; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 110px;"
 BTN_MON_ON_STYLE     = "background-color: #2D7A3A; color: #FFFFFF; border-radius: 4px; padding: 6px 16px; font-weight: bold; min-width: 110px;"
@@ -130,12 +128,8 @@ class MainWindow(QMainWindow):
     狀態機：
         IDLE       → 程式啟動，尚未連線
         MONITORING → 連線成功，持續讀取 AI/DI，顯示即時波形
-        TESTING    → 操作員按「開始檢測」，5 分鐘倒數計時
-        SAVING     → 時間到或提前停止，寫入 DB
+        DIAGNOSING → 操作員按「高取樣診斷」，高速採樣 5CH × 2輪
     """
-
-    # Qt Signal：場次完成時由背景執行緒 emit，確保 _save_session_result 在主執行緒執行
-    _session_done_signal = pyqtSignal(object)
 
     # Qt Signals：診斷用（確保背景執行緒資料在主執行緒更新 UI）
     _diag_chunk_signal    = pyqtSignal(int, int, object, float)   # ch_idx, round_idx, chunk, elapsed_s
@@ -160,25 +154,15 @@ class MainWindow(QMainWindow):
         # ── 資料庫 ────────────────────────────────────────────────────────────
         self._db = DatabaseManager(DATABASE["db_path"])
 
-        # ── 測試場次 ──────────────────────────────────────────────────────────
-        self._session = TestSession(
-            duration_s=float(DATABASE.get("default_duration_s", 300))
-        )
-        self._session.set_tick_callback(self._on_session_tick)
-        self._session.set_done_callback(self._on_session_done)
-        self._current_session_id: int = -1
-
-        # ── 波形錄製器（FAIL 時儲存 .npz）────────────────────────────────────
-        self._waveform_recorder = WaveformRecorder()
+        # ── 參數設置暫存（由「參數設置」對話框帶入，供診斷場次使用）──────────
+        self._param_serial_no: str = ""
+        self._param_operator:  str = ""
 
         # ── 診斷掃描器 ────────────────────────────────────────────────────────
         self._diag_scanner: DiagnosticScanner = None
         self._diag_session_id: int = -1
         self._diag_start_time: float = 0.0
         self._is_diagnosing: bool = False
-
-        # 連接 signal：確保場次完成時在主執行緒執行 _save_session_result
-        self._session_done_signal.connect(self._save_session_result)
 
         # 連接診斷 signals（確保在主執行緒更新 UI）
         self._diag_chunk_signal.connect(self._on_diag_chunk)
@@ -211,9 +195,6 @@ class MainWindow(QMainWindow):
         # 頂部工具列
         main_layout.addWidget(self._build_toolbar())
 
-        # 檢測進度列（預設隱藏，檢測中才顯示）
-        main_layout.addWidget(self._build_progress_bar())
-
         # 診斷進度列（預設隱藏，診斷中才顯示）
         main_layout.addWidget(self._build_diag_progress_bar())
 
@@ -238,9 +219,6 @@ class MainWindow(QMainWindow):
 
         self._result_panel = ResultPanel()
         right_layout.addWidget(self._result_panel)
-
-        # 即時統計面板（檢測中顯示）
-        right_layout.addWidget(self._build_live_stats_panel())
 
         splitter.addWidget(right_panel)
         splitter.setSizes([820, 460])
@@ -288,19 +266,13 @@ class MainWindow(QMainWindow):
         self._btn_monitor.clicked.connect(self._on_toggle_monitor)
         layout.addWidget(self._btn_monitor)
 
-        # 開始檢測（連線後可用，不需監控開啟）
-        self._btn_start = QPushButton("▶ 開始檢測")
+        # 參數設置（連線後可用，不需監控開啟）
+        self._btn_start = QPushButton("⚙ 參數設置")
         self._btn_start.setStyleSheet(BTN_START_STYLE)
         self._btn_start.setEnabled(False)
-        self._btn_start.clicked.connect(self._on_start_test)
+        self._btn_start.setToolTip("設定量測參數（PPR、Hall/Encoder 閾值）及馬達序號/操作員")
+        self._btn_start.clicked.connect(self._on_open_param_settings)
         layout.addWidget(self._btn_start)
-
-        # 提前停止（檢測中才可用）
-        self._btn_early_stop = QPushButton("⏹ 提前停止")
-        self._btn_early_stop.setStyleSheet(BTN_EARLY_STYLE)
-        self._btn_early_stop.setEnabled(False)
-        self._btn_early_stop.clicked.connect(self._on_early_stop)
-        layout.addWidget(self._btn_early_stop)
 
         # 高取樣診斷（連線後可用，不需監控開啟）
         self._btn_diag = QPushButton("🔬 高取樣診斷")
@@ -344,44 +316,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._btn_reconnect)
 
         return toolbar
-
-    def _build_progress_bar(self) -> QWidget:
-        """建立檢測進度列（含倒數計時與序號顯示）"""
-        self._progress_container = QWidget()
-        self._progress_container.setFixedHeight(48)
-        self._progress_container.setStyleSheet(
-            "background-color: #1A2A1A; border-radius: 4px; border: 1px solid #2D5A2D;"
-        )
-        self._progress_container.setVisible(False)
-
-        layout = QHBoxLayout(self._progress_container)
-        layout.setContentsMargins(10, 4, 10, 4)
-        layout.setSpacing(10)
-
-        self._session_info_lbl = QLabel("🔵 檢測中")
-        self._session_info_lbl.setStyleSheet("color: #44FF44; font-weight: bold; font-size: 13px;")
-        layout.addWidget(self._session_info_lbl)
-
-        self._serial_display_lbl = QLabel("")
-        self._serial_display_lbl.setStyleSheet("color: #AAAAAA; font-size: 12px;")
-        layout.addWidget(self._serial_display_lbl)
-
-        layout.addStretch()
-
-        self._countdown_lbl = QLabel("05:00")
-        self._countdown_lbl.setStyleSheet(
-            "color: #FFFF44; font-size: 16px; font-weight: bold; font-family: Consolas;"
-        )
-        layout.addWidget(self._countdown_lbl)
-
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 1000)
-        self._progress_bar.setValue(0)
-        self._progress_bar.setFixedWidth(200)
-        self._progress_bar.setTextVisible(False)
-        layout.addWidget(self._progress_bar)
-
-        return self._progress_container
 
     def _build_diag_progress_bar(self) -> QWidget:
         """建立診斷進度列（診斷中才顯示）"""
@@ -455,56 +389,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._diag_progress_lbl)
 
         return self._diag_progress_container
-
-    def _build_live_stats_panel(self) -> QGroupBox:
-        """建立即時統計面板"""
-        self._live_stats_group = QGroupBox("即時統計")
-        self._live_stats_group.setVisible(False)
-        layout = QVBoxLayout(self._live_stats_group)
-        layout.setSpacing(4)
-
-        # Hall 統計列
-        hall_row = QHBoxLayout()
-        hall_row.addWidget(QLabel("Hall:"))
-        self._hall_pass_lbl  = QLabel("PASS: 0")
-        self._hall_pass_lbl.setStyleSheet("color: #44FF44;")
-        self._hall_fail_lbl  = QLabel("FAIL: 0")
-        self._hall_fail_lbl.setStyleSheet("color: #FF4444;")
-        self._hall_rate_lbl  = QLabel("成功率: ---%")
-        self._hall_rate_lbl.setStyleSheet("color: #FFFF44; font-weight: bold;")
-        hall_row.addWidget(self._hall_pass_lbl)
-        hall_row.addWidget(self._hall_fail_lbl)
-        hall_row.addWidget(self._hall_rate_lbl)
-        hall_row.addStretch()
-        layout.addLayout(hall_row)
-
-        # Encoder 統計列
-        enc_row = QHBoxLayout()
-        enc_row.addWidget(QLabel("Enc: "))
-        self._enc_pass_lbl   = QLabel("PASS: 0")
-        self._enc_pass_lbl.setStyleSheet("color: #44FF44;")
-        self._enc_fail_lbl   = QLabel("FAIL: 0")
-        self._enc_fail_lbl.setStyleSheet("color: #FF4444;")
-        self._enc_rate_lbl   = QLabel("成功率: ---%")
-        self._enc_rate_lbl.setStyleSheet("color: #FFFF44; font-weight: bold;")
-        enc_row.addWidget(self._enc_pass_lbl)
-        enc_row.addWidget(self._enc_fail_lbl)
-        enc_row.addWidget(self._enc_rate_lbl)
-        enc_row.addStretch()
-        layout.addLayout(enc_row)
-
-        # RPM 列
-        rpm_row = QHBoxLayout()
-        self._avg_rpm_lbl = QLabel("平均 RPM: ---")
-        self._avg_rpm_lbl.setStyleSheet("color: #AAAAFF;")
-        self._max_rpm_lbl = QLabel("最高: ---")
-        self._max_rpm_lbl.setStyleSheet("color: #AAAAFF;")
-        rpm_row.addWidget(self._avg_rpm_lbl)
-        rpm_row.addWidget(self._max_rpm_lbl)
-        rpm_row.addStretch()
-        layout.addLayout(rpm_row)
-
-        return self._live_stats_group
 
     def _setup_timer(self):
         """設定 GUI 更新計時器（監控模式持續運行）"""
@@ -617,19 +501,18 @@ class MainWindow(QMainWindow):
         if self._is_diagnosing:
             QMessageBox.warning(self, "警告", "診斷已在進行中")
             return
-        if self._session.is_running:
-            QMessageBox.warning(self, "警告", "檢測進行中，請先停止檢測再啟動診斷")
-            return
 
         # 確認對話框
         ch_count = len(DIAGNOSTIC["channels"])
         total_s  = ch_count * DIAGNOSTIC["seconds_per_ch"] * DIAGNOSTIC["rounds"]
+        serial_hint = f"序號：{self._param_serial_no}" if self._param_serial_no else "（序號未設定，可先按「參數設置」輸入）"
         reply = QMessageBox.question(
             self, "啟動高取樣率診斷",
             f"即將啟動高取樣率診斷：\n\n"
             f"  • {ch_count} 個通道，每通道 {DIAGNOSTIC['seconds_per_ch']} 秒\n"
             f"  • 取樣率：{DIAGNOSTIC['sample_rate']:,} Hz\n"
-            f"  • 共 {DIAGNOSTIC['rounds']} 輪，預計 {total_s} 秒\n\n"
+            f"  • 共 {DIAGNOSTIC['rounds']} 輪，預計 {total_s} 秒\n"
+            f"  • {serial_hint}\n\n"
             f"診斷期間將暫停即時監控（若已開啟）。\n"
             f"完成後自動分析 PASS/FAIL，資料存成 npz 並寫入歷史記錄。\n\n"
             f"確定開始？",
@@ -649,10 +532,11 @@ class MainWindow(QMainWindow):
             self._start_monitoring()
             return
 
-        # ── 3. 在 DB 建立診斷場次記錄 ─────────────────────────────────────────
+        # ── 3. 在 DB 建立診斷場次記錄（帶入參數設置的序號/操作員）────────────
         try:
             self._diag_session_id = self._db.create_diagnostic_session(
-                operator="",
+                operator=self._param_operator,
+                serial_no=self._param_serial_no,
                 notes=f"高取樣診斷 {DIAGNOSTIC['sample_rate']}Hz × {DIAGNOSTIC['seconds_per_ch']}s × {DIAGNOSTIC['rounds']}輪"
             )
         except Exception as e:
@@ -676,7 +560,6 @@ class MainWindow(QMainWindow):
         self._btn_diag.setEnabled(False)
         self._btn_diag_stop.setEnabled(True)
         self._btn_start.setEnabled(False)
-        self._btn_early_stop.setEnabled(False)
         self._btn_monitor.setEnabled(False)   # 診斷中禁用監控開關
 
         # ── 7. 建立並啟動診斷掃描器 ───────────────────────────────────────────
@@ -799,15 +682,17 @@ class MainWindow(QMainWindow):
         sample_rate = result.get("sample_rate", DIAGNOSTIC["sample_rate"])
 
         # ── 1. 高速數據診斷分析（DiagAnalyzer）──────────────────────────────
-        diag_analysis = None
-        diag_pass     = None
-        diag_ch_json  = ""
+        diag_analysis   = None
+        diag_pass       = None
+        diag_ch_json    = ""
+        diag_summary    = ""
         try:
             if raw_results and channels:
-                analyzer     = DiagAnalyzer()
+                analyzer      = DiagAnalyzer()
                 diag_analysis = analyzer.analyze_all(raw_results, channels, sample_rate)
-                diag_pass    = diag_analysis.overall_pass
-                # 序列化各通道結果為 JSON 字串（供 DB 儲存）
+                diag_pass     = diag_analysis.overall_pass
+                diag_summary  = diag_analysis.summary_text   # 完整摘要（含比值交叉驗證、fail 原因）
+                # 序列化各通道結果為 JSON 字串（供 DB 儲存，保留舊格式相容）
                 import json
                 ch_summary_simple = {
                     ch_name: {
@@ -827,7 +712,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[MainWindow] DiagAnalyzer 分析失敗: {e}")
 
-        # ── 2. 寫入 DB 診斷場次記錄（含 PASS/FAIL）──────────────────────────
+        # ── 2. 寫入 DB 診斷場次記錄（含 PASS/FAIL 與完整摘要）──────────────
         if self._diag_session_id > 0:
             try:
                 self._db.close_diagnostic_session(
@@ -838,6 +723,7 @@ class MainWindow(QMainWindow):
                     rounds_done=rounds_done,
                     diag_pass=diag_pass,
                     diag_ch_results=diag_ch_json,
+                    diag_summary=diag_summary,
                 )
             except Exception as e:
                 print(f"[MainWindow] 寫入診斷 DB 失敗: {e}")
@@ -852,27 +738,25 @@ class MainWindow(QMainWindow):
 
         # ── 5. 恢復按鈕狀態（監控維持關閉，讓使用者自行決定是否開啟）────────
         self._btn_diag_stop.setEnabled(False)
-        self._btn_early_stop.setEnabled(False)
         self._btn_monitor.setEnabled(True)
         self._btn_start.setEnabled(True)
         self._btn_diag.setEnabled(True)
 
-        # ── 6. 顯示診斷結果摘要（含 PASS/FAIL 分析）─────────────────────────
+        # ── 6. 顯示診斷結果摘要（含 PASS/FAIL 分析，可捲動對話框）────────────
         status = "✔ 完成" if completed else "⚠ 提早結束"
-        npz_note = f"\n\n📁 資料已儲存：\n{npz_path}" if npz_path else "\n\n⚠ 資料儲存失敗"
+        npz_note = f"\n📁 資料已儲存：\n{npz_path}" if npz_path else "\n⚠ 資料儲存失敗"
 
         if diag_analysis is not None:
-            overall_str = "✔ PASS" if diag_pass else "✘ FAIL"
+            overall_str  = "✔ PASS" if diag_pass else "✘ FAIL"
             analysis_note = (
-                f"\n\n─── 診斷分析結果 ───\n"
+                f"\n─── 診斷分析結果 ───\n"
                 f"{diag_analysis.summary_text}"
             )
         else:
             overall_str   = "— 未分析"
-            analysis_note = "\n\n（無原始資料可分析）"
+            analysis_note = "\n（無原始資料可分析）"
 
-        QMessageBox.information(
-            self, "診斷完成",
+        full_text = (
             f"高取樣率診斷{status}\n\n"
             f"已完成輪數：{rounds_done} / {DIAGNOSTIC['rounds']}\n"
             f"實際時長：{duration_s:.0f} 秒\n"
@@ -882,6 +766,7 @@ class MainWindow(QMainWindow):
             f"{npz_note}\n\n"
             f"可在「歷史記錄」中回看診斷波形。"
         )
+        self._show_diag_result_dialog("診斷完成", full_text)
 
         self._status_bar.showMessage(
             f"診斷{status} | {rounds_done}/{DIAGNOSTIC['rounds']} 輪 | "
@@ -890,185 +775,132 @@ class MainWindow(QMainWindow):
         )
         print(f"[MainWindow] 診斷完成，監控維持關閉狀態")
 
-    # ─── 檢測控制事件 ──────────────────────────────────────────────────────────
+    # ─── 診斷結果可捲動對話框 ──────────────────────────────────────────────────
 
-    def _on_start_test(self):
-        """操作員按「開始檢測」：開啟對話框輸入序號，然後啟動場次"""
-        if not self._daq.is_connected:
-            QMessageBox.warning(self, "警告", "裝置未連線，請先連線 USB-4716")
-            return
-        if self._session.is_running:
-            QMessageBox.warning(self, "警告", "檢測已在進行中")
-            return
+    def _show_diag_result_dialog(self, title: str, text: str):
+        """
+        顯示可捲動的診斷結果對話框。
 
-        # 開啟場次啟動對話框
-        dlg = SessionStartDialog(
-            parent=self,
-            default_duration_min=int(DATABASE.get("default_duration_s", 300) // 60)
+        診斷報告（含比值交叉驗證）文字較長，使用 QDialog + QTextEdit
+        取代 QMessageBox，讓使用者可以上下捲動閱讀完整報告。
+
+        Args:
+            title: 對話框標題
+            text:  報告全文（純文字）
+        """
+        from PyQt5.QtWidgets import (
+            QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
         )
+        from PyQt5.QtGui import QFont
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumSize(560, 480)
+        dlg.resize(620, 560)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # 可捲動文字區域（唯讀）
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(text)
+        text_edit.setFont(QFont("Consolas", 10))
+        text_edit.setStyleSheet(
+            "QTextEdit {"
+            "  background-color: #1E1E1E;"
+            "  color: #CCCCCC;"
+            "  border: 1px solid #444444;"
+            "  border-radius: 4px;"
+            "}"
+            "QScrollBar:vertical {"
+            "  background: #2A2A2A;"
+            "  width: 12px;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            "  background: #555555;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        layout.addWidget(text_edit)
+
+        # 確認按鈕
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #2A2A2A;"
+            "  color: #CCCCCC;"
+            "  border: 1px solid #555555;"
+            "  border-radius: 4px;"
+            "  padding: 6px 20px;"
+            "}"
+            "QPushButton:hover { background-color: #3A3A3A; }"
+            "QPushButton:pressed { background-color: #1A1A1A; }"
+        )
+        layout.addWidget(btn_box)
+
+        # 捲動至頂部
+        text_edit.moveCursor(text_edit.textCursor().Start)
+
+        dlg.exec_()
+
+    # ─── 參數設置事件 ──────────────────────────────────────────────────────────
+
+    def _on_open_param_settings(self):
+        """操作員按「參數設置」：開啟對話框設定量測參數並暫存序號/操作員"""
+        dlg = SessionStartDialog(parent=self)
         if dlg.exec_() != SessionStartDialog.Accepted:
             return
 
         info = dlg.get_session_info()
-        serial_no   = info["serial_no"]
-        operator    = info["operator"]
-        duration_s  = info["duration_s"]
 
-        # 套用參數設定
-        ENCODER_THRESHOLDS["ppr"] = info["ppr"]
-        self._di_reader._ppr = info["ppr"]
-        self._enc_analyzer.PPR = info["ppr"]
+        # 暫存序號/操作員（供下次診斷場次使用）
+        self._param_serial_no = info["serial_no"]
+        self._param_operator  = info["operator"]
 
+        # 套用量測參數設定
+
+        # ── Hall 規格 ─────────────────────────────────────────────────────────
+        HALL_THRESHOLDS["hall_pulses_per_rev"] = info["hall_pulses_per_rev"]
         HALL_THRESHOLDS["vh_min"] = info["hall_vh_min"]
         HALL_THRESHOLDS["vl_max"] = info["hall_vl_max"]
         self._hall_analyzer.VH_MIN = info["hall_vh_min"]
         self._hall_analyzer.VL_MAX = info["hall_vl_max"]
 
-        ENCODER_THRESHOLDS["vh_min"] = info["enc_vh_min"]
-        ENCODER_THRESHOLDS["vl_max"] = info["enc_vl_max"]
-        self._enc_analyzer.VH_MIN = info["enc_vh_min"]
-        self._enc_analyzer.VL_MAX = info["enc_vl_max"]
+        # ── Encoder 規格 ──────────────────────────────────────────────────────
+        ENCODER_THRESHOLDS["ppr"]             = info["ppr"]
+        ENCODER_THRESHOLDS["resolution_bits"] = info["resolution_bits"]
+        ENCODER_THRESHOLDS["vh_min"]          = info["enc_vh_min"]
+        ENCODER_THRESHOLDS["vl_max"]          = info["enc_vl_max"]
+        self._di_reader._ppr       = info["ppr"]
+        self._enc_analyzer.PPR     = info["ppr"]
+        self._enc_analyzer.VH_MIN  = info["enc_vh_min"]
+        self._enc_analyzer.VL_MAX  = info["enc_vl_max"]
 
-        # 更新場次時長
-        self._session.duration_s = duration_s
+        # ── 比值交叉驗證容差 ──────────────────────────────────────────────────
+        DIAGNOSTIC["analysis"]["ratio_tolerance"] = info["ratio_tolerance"]
 
-        # 在 DB 建立場次記錄
-        try:
-            self._current_session_id = self._db.create_session(
-                serial_no=serial_no,
-                operator=operator
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "DB 錯誤", f"無法建立場次記錄：\n{e}")
-            return
+        # 計算理論比值（供狀態列顯示）
+        hall_ppr = info["hall_pulses_per_rev"]
+        enc_ppr  = info["ppr"]
+        theory_ratio = enc_ppr / hall_ppr if hall_ppr > 0 else 0.0
 
-        # 清除分析歷史（監控期間累積的不算）
-        self._hall_analyzer.clear_history()
-        self._enc_analyzer.clear_history()
-        self._report_gen.clear()
-
-        # 啟動場次 & 開始錄製波形
-        self._session.start(serial_no=serial_no, operator=operator)
-        self._waveform_recorder.start()
-
-        # 更新 UI 狀態
-        self._btn_start.setEnabled(False)
-        self._btn_early_stop.setEnabled(True)
-        self._progress_container.setVisible(True)
-        self._live_stats_group.setVisible(True)
-
-        serial_display = f"序號: {serial_no}" if serial_no else "序號: (未輸入)"
-        self._session_info_lbl.setText("🔵 檢測中")
-        self._serial_display_lbl.setText(serial_display)
-
-        # 立即更新倒數顯示（不等第一次 tick，避免顯示舊的初始值）
-        total_min = int(duration_s // 60)
-        total_sec = int(duration_s) % 60
-        self._countdown_lbl.setText(f"{total_min:02d}:{total_sec:02d}")
-        self._progress_bar.setValue(0)
-
+        serial_display = f"序號: {self._param_serial_no}" if self._param_serial_no else "序號: (未輸入)"
         self._status_bar.showMessage(
-            f"檢測中 | {serial_display} | 時長: {total_min} 分鐘"
+            f"參數已套用 | {serial_display} | "
+            f"Hall {hall_ppr}週期/轉 | "
+            f"Enc PPR={enc_ppr}({info['resolution_bits']}bits) | "
+            f"理論比值={theory_ratio:.3f} ±{info['ratio_tolerance']*100:.0f}% | "
+            f"Hall VH≥{info['hall_vh_min']:.2f}V VL≤{info['hall_vl_max']:.2f}V | "
+            f"Enc VH≥{info['enc_vh_min']:.2f}V VL≤{info['enc_vl_max']:.2f}V"
         )
-
-    def _on_early_stop(self):
-        """操作員提前停止檢測"""
-        if not self._session.is_running:
-            return
-        reply = QMessageBox.question(
-            self, "確認提前停止",
-            "確定要提前停止檢測並儲存目前結果？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+        print(
+            f"[MainWindow] 參數設置已套用 | {serial_display} | "
+            f"Hall {hall_ppr}週期/轉 | Enc PPR={enc_ppr}({info['resolution_bits']}bits) | "
+            f"理論比值={theory_ratio:.3f} ±{info['ratio_tolerance']*100:.0f}%"
         )
-        if reply != QMessageBox.Yes:
-            return
-
-        stats = self._session.stop()
-        self._save_session_result(stats)
-
-    def _on_session_tick(self, elapsed_s: float, remaining_s: float):
-        """場次計時回呼（每秒觸發，來自背景執行緒）
-        倒數 UI 已改由主執行緒 QTimer (_update_display) 直接更新，此回呼保留供未來擴充用。
-        """
-        pass  # 不再透過 singleShot 更新 UI，避免跨執行緒排程延遲問題
-
-    def _on_session_done(self, stats):
-        """場次完成回呼（時間到後由背景執行緒觸發）
-        透過 pyqtSignal 確保 _save_session_result 在主執行緒執行，
-        避免 QTimer.singleShot 在非主執行緒呼叫時可能失效的問題。
-        """
-        self._session_done_signal.emit(stats)
-
-    def _save_session_result(self, stats):
-        """儲存場次結果至 DB 並更新 UI"""
-        # ── 停止錄製，FAIL 時儲存波形 ─────────────────────────────────────────
-        self._waveform_recorder.stop()
-        waveform_path = self._waveform_recorder.save_if_fail(
-            session_id=self._current_session_id,
-            overall_pass=stats.overall_pass,
-        )
-
-        try:
-            # 關閉場次
-            self._db.close_session(
-                self._current_session_id,
-                duration_s=stats.actual_duration_s
-            )
-            # 儲存統計結果
-            self._db.save_result(
-                session_id=self._current_session_id,
-                hall_total=stats.hall_total,
-                hall_pass=stats.hall_pass,
-                enc_total=stats.enc_total,
-                enc_pass=stats.enc_pass,
-                avg_rpm=stats.avg_rpm,
-                max_rpm=stats.max_rpm,
-                min_rpm=stats.min_rpm,
-            )
-            # 若有波形檔，更新路徑至 DB
-            if waveform_path:
-                self._db.update_waveform_path(
-                    self._current_session_id, waveform_path
-                )
-        except Exception as e:
-            QMessageBox.critical(self, "DB 錯誤", f"儲存結果失敗：\n{e}")
-
-        # 恢復 UI 狀態
-        self._btn_start.setEnabled(True)
-        self._btn_early_stop.setEnabled(False)
-        self._progress_container.setVisible(False)
-        self._live_stats_group.setVisible(False)
-        self._progress_bar.setValue(0)
-
-        # 顯示結果摘要
-        overall = "✔ PASS" if stats.overall_pass else "✘ FAIL"
-        serial  = self._session.serial_no or "(無序號)"
-        wf_note = (
-            f"\n\n⚠ FAIL：波形數據已儲存\n可在歷史記錄中回看波形"
-            if waveform_path else ""
-        )
-        msg = (
-            f"檢測完成！\n\n"
-            f"序號：{serial}\n"
-            f"實際時長：{stats.actual_duration_s:.0f} 秒\n\n"
-            f"Hall Sensor：{stats.hall_pass}/{stats.hall_total} "
-            f"({stats.hall_pass_rate*100:.1f}%)\n"
-            f"Encoder：{stats.enc_pass}/{stats.enc_total} "
-            f"({stats.enc_pass_rate*100:.1f}%)\n\n"
-            f"整體結果：{overall}\n\n"
-            f"結果已自動儲存至資料庫"
-            f"{wf_note}"
-        )
-        QMessageBox.information(self, "檢測完成", msg)
-
-        self._status_bar.showMessage(
-            f"檢測完成 | {serial} | Hall {stats.hall_pass_rate*100:.1f}% | "
-            f"Enc {stats.enc_pass_rate*100:.1f}% | {overall} | 監控中..."
-        )
-
-        # 重置場次，回到監控模式
-        self._session.reset()
 
     def _on_reset_encoder(self):
         """重置 Encoder 計數器"""
@@ -1138,42 +970,8 @@ class MainWindow(QMainWindow):
         try:
             self._update_waveforms()
             self._update_analysis()
-            # 若場次正在執行，在主執行緒直接更新倒數計時與即時統計
-            # 不依賴背景執行緒的 singleShot，避免跨執行緒排程延遲
-            if self._session.is_running:
-                self._update_session_ui()
         except Exception as e:
             print(f"[MainWindow] 顯示更新錯誤: {e}")
-
-    def _update_session_ui(self):
-        """在主執行緒更新倒數計時與即時統計（由 _update_display 每 50ms 呼叫）"""
-        elapsed_s   = self._session.elapsed_s
-        remaining_s = self._session.remaining_s
-
-        # 倒數計時
-        mins = int(remaining_s) // 60
-        secs = int(remaining_s) % 60
-        self._countdown_lbl.setText(f"{mins:02d}:{secs:02d}")
-
-        # 進度條（0~1000）
-        if self._session.duration_s > 0:
-            progress = int(elapsed_s / self._session.duration_s * 1000)
-            self._progress_bar.setValue(min(1000, progress))
-
-        # 即時統計
-        live = self._session.get_live_stats()
-        self._hall_pass_lbl.setText(f"PASS: {live['hall_pass']}")
-        self._hall_fail_lbl.setText(f"FAIL: {live['hall_fail']}")
-        hall_rate = live['hall_pass_rate'] * 100
-        self._hall_rate_lbl.setText(f"成功率: {hall_rate:.1f}%")
-
-        self._enc_pass_lbl.setText(f"PASS: {live['enc_pass']}")
-        self._enc_fail_lbl.setText(f"FAIL: {live['enc_fail']}")
-        enc_rate = live['enc_pass_rate'] * 100
-        self._enc_rate_lbl.setText(f"成功率: {enc_rate:.1f}%")
-
-        self._avg_rpm_lbl.setText(f"平均 RPM: {live['avg_rpm']:.1f}")
-        self._max_rpm_lbl.setText(f"最高: {live['max_rpm']:.1f}")
 
     def _update_waveforms(self):
         """更新波形顯示（即時監控開啟時才有資料）"""
@@ -1208,16 +1006,6 @@ class MainWindow(QMainWindow):
             enc_state=enc_state,
         )
 
-        # ── 若場次正在執行，錄製波形快照（供 FAIL 時儲存）──────────────────
-        if self._session.is_running:
-            self._waveform_recorder.append(
-                hall_u=self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["U"]),
-                hall_v=self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["V"]),
-                hall_w=self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["W"]),
-                enc_a=self._ai_reader.get_buffer(ENCODER_THRESHOLDS["channels"]["A"]),
-                enc_b=self._ai_reader.get_buffer(ENCODER_THRESHOLDS["channels"]["B"]),
-            )
-
     # ─── 視窗關閉 ──────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
@@ -1230,27 +1018,6 @@ class MainWindow(QMainWindow):
                 self._daq.exit_diag_mode()
             except Exception:
                 pass
-
-        # 若場次正在執行，先停止並儲存
-        if self._session.is_running:
-            stats = self._session.stop()
-            try:
-                self._db.close_session(
-                    self._current_session_id,
-                    duration_s=stats.actual_duration_s
-                )
-                self._db.save_result(
-                    session_id=self._current_session_id,
-                    hall_total=stats.hall_total,
-                    hall_pass=stats.hall_pass,
-                    enc_total=stats.enc_total,
-                    enc_pass=stats.enc_pass,
-                    avg_rpm=stats.avg_rpm,
-                    max_rpm=stats.max_rpm,
-                    min_rpm=stats.min_rpm,
-                )
-            except Exception as e:
-                print(f"[MainWindow] 關閉時儲存失敗: {e}")
 
         self._stop_monitoring()
         self._daq.disconnect()

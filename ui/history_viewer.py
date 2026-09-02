@@ -1,7 +1,6 @@
 """
 歷史記錄查詢視窗
 顯示所有測試場次的統計摘要，支援篩選與匯出
-FAIL 場次若有波形數據，可點擊「📈 回看波形」開啟回放對話框
 診斷場次若有診斷波形，可點擊「🔬 回看診斷」開啟診斷回放對話框
 """
 
@@ -22,7 +21,6 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QBrush
 
 from db.database import DatabaseManager
-from ui.waveform_replay_dialog import WaveformReplayDialog
 from ui.diagnostic_replay_dialog import DiagnosticReplayDialog
 from logic.diagnostic_scanner import DiagnosticScanner
 
@@ -139,18 +137,14 @@ VIEWER_STYLE = """
 
 # 欄位定義：(欄位名稱, DB key, 寬度, 對齊)
 COLUMNS = [
-    ("ID",          "id",             45,  Qt.AlignCenter),
-    ("類型",         "session_type",   55,  Qt.AlignCenter),
-    ("開始時間",     "started_at",    145,  Qt.AlignLeft),
-    ("馬達序號",     "serial_no",     120,  Qt.AlignLeft),
-    ("操作員",       "operator",       80,  Qt.AlignCenter),
-    ("時長(秒)",     "duration_s",     70,  Qt.AlignCenter),
-    ("Hall 成功率",  "hall_pass_rate", 90,  Qt.AlignCenter),
-    ("Enc 成功率",   "enc_pass_rate",  90,  Qt.AlignCenter),
-    ("平均 RPM",     "avg_rpm",        80,  Qt.AlignCenter),
-    ("最高 RPM",     "max_rpm",        80,  Qt.AlignCenter),
-    ("整體結果",     "overall_pass",   90,  Qt.AlignCenter),
-    ("波形",         "waveform_path",  60,  Qt.AlignCenter),
+    ("ID",        "id",            45,  Qt.AlignCenter),
+    ("類型",       "session_type",  70,  Qt.AlignCenter),
+    ("開始時間",   "started_at",   145,  Qt.AlignLeft),
+    ("馬達序號",   "serial_no",    140,  Qt.AlignLeft),
+    ("操作員",     "operator",      90,  Qt.AlignCenter),
+    ("時長(秒)",   "duration_s",    70,  Qt.AlignCenter),
+    ("整體結果",   "overall_pass",  90,  Qt.AlignCenter),
+    ("診斷波形",   "waveform_path", 70,  Qt.AlignCenter),
 ]
 
 
@@ -292,19 +286,6 @@ class HistoryViewer(QDialog):
         btn_delete.clicked.connect(self._on_delete)
         h.addWidget(btn_delete)
 
-        # 回看波形按鈕（FAIL 場次且有波形檔時啟用）
-        self._btn_waveform = QPushButton("📈 回看波形")
-        self._btn_waveform.setObjectName("btn_waveform")
-        self._btn_waveform.setEnabled(False)
-        self._btn_waveform.setToolTip("選取 FAIL 場次且有波形數據時可用")
-        self._btn_waveform.clicked.connect(self._on_view_waveform)
-        self._btn_waveform.setStyleSheet(
-            "QPushButton#btn_waveform { background-color: #2D5A7A; }"
-            "QPushButton#btn_waveform:hover { background-color: #3A7AAA; }"
-            "QPushButton#btn_waveform:disabled { background-color: #3A3A3A; color: #666666; }"
-        )
-        h.addWidget(self._btn_waveform)
-
         # 回看診斷按鈕（診斷場次且有診斷 npz 時啟用）
         self._btn_diag_waveform = QPushButton("🔬 回看診斷")
         self._btn_diag_waveform.setObjectName("btn_diag_waveform")
@@ -392,34 +373,24 @@ class HistoryViewer(QDialog):
                         item.setForeground(QBrush(QColor("#888888")))
                         item.setText("---")
 
-                # 波形欄著色
+                # 診斷波形欄著色（僅診斷場次顯示有/無）
                 elif key == "waveform_path":
                     wf = rec.get("waveform_path") or ""
-                    if wf and os.path.isfile(wf):
-                        if is_diag:
+                    if is_diag:
+                        if wf and os.path.isfile(wf):
                             item.setForeground(QBrush(QColor("#4AABFF")))
                             item.setText("🔬 有")
+                            item.setToolTip(wf)
+                        elif wf:
+                            item.setForeground(QBrush(QColor("#FF8844")))
+                            item.setText("⚠ 遺失")
+                            item.setToolTip(f"檔案不存在：{wf}")
                         else:
-                            item.setForeground(QBrush(QColor("#44AAFF")))
-                            item.setText("📈 有")
-                        item.setToolTip(wf)
-                    elif wf:
-                        item.setForeground(QBrush(QColor("#FF8844")))
-                        item.setText("⚠ 遺失")
-                        item.setToolTip(f"檔案不存在：{wf}")
+                            item.setForeground(QBrush(QColor("#555555")))
+                            item.setText("—")
                     else:
                         item.setForeground(QBrush(QColor("#555555")))
                         item.setText("—")
-
-                # 成功率著色（診斷場次無此資料）
-                elif key in ("hall_pass_rate", "enc_pass_rate") and value is not None and not is_diag:
-                    rate = float(value)
-                    if rate >= 0.95:
-                        item.setForeground(QBrush(QColor("#44FF44")))
-                    elif rate >= 0.80:
-                        item.setForeground(QBrush(QColor("#FFAA00")))
-                    else:
-                        item.setForeground(QBrush(QColor("#FF4444")))
 
                 self._table.setItem(row_idx, col_idx, item)
 
@@ -429,10 +400,6 @@ class HistoryViewer(QDialog):
         """格式化顯示值"""
         if value is None:
             return "---"
-        if key in ("hall_pass_rate", "enc_pass_rate"):
-            return f"{float(value)*100:.1f}%"
-        if key in ("avg_rpm", "max_rpm", "min_rpm"):
-            return f"{float(value):.1f}"
         if key == "duration_s":
             return f"{float(value):.0f}" if value else "---"
         if key == "overall_pass":
@@ -445,15 +412,16 @@ class HistoryViewer(QDialog):
     def _update_stats_label(self):
         """更新頂部統計摘要標籤"""
         try:
-            stats = self._db.get_summary_stats()
-            total = stats.get("total_sessions") or 0
-            passed = stats.get("pass_sessions") or 0
-            avg_hall = (stats.get("avg_hall_pass_rate") or 0) * 100
-            avg_enc  = (stats.get("avg_enc_pass_rate")  or 0) * 100
+            total  = len(self._records)
+            # 診斷場次：diag_pass=1 為 PASS；一般測試場次：overall_pass=1 為 PASS
+            passed = sum(
+                1 for r in self._records
+                if (r.get("session_type") == "diagnostic" and r.get("diag_pass") == 1)
+                or (r.get("session_type") != "diagnostic" and r.get("overall_pass") == 1)
+            )
+            diag_count = sum(1 for r in self._records if r.get("session_type") == "diagnostic")
             self._stats_lbl.setText(
-                f"共 {total} 筆  |  整體 PASS: {passed} 筆  |  "
-                f"平均 Hall 成功率: {avg_hall:.1f}%  |  "
-                f"平均 Enc 成功率: {avg_enc:.1f}%"
+                f"共 {total} 筆  |  PASS: {passed} 筆  |  診斷場次: {diag_count} 筆"
             )
         except Exception:
             pass
@@ -465,16 +433,14 @@ class HistoryViewer(QDialog):
         self._load_data()
 
     def _on_row_selected(self):
-        """點選列時顯示詳細資訊，並更新「回看波形」/「回看診斷」按鈕狀態"""
+        """點選列時顯示詳細資訊，並更新「回看診斷」按鈕狀態"""
         selected = self._table.selectedItems()
         if not selected:
-            self._btn_waveform.setEnabled(False)
             self._btn_diag_waveform.setEnabled(False)
             return
 
         row = self._table.currentRow()
         if row < 0 or row >= len(self._records):
-            self._btn_waveform.setEnabled(False)
             self._btn_diag_waveform.setEnabled(False)
             return
 
@@ -486,9 +452,6 @@ class HistoryViewer(QDialog):
         has_file = bool(wf_path) and os.path.isfile(wf_path)
 
         if is_diag:
-            # 診斷場次：啟用「回看診斷」，停用「回看波形」
-            self._btn_waveform.setEnabled(False)
-            self._btn_waveform.setToolTip("此為診斷場次，請使用「回看診斷」")
             can_diag = has_file and DiagnosticScanner.is_diag_npz(wf_path)
             self._btn_diag_waveform.setEnabled(can_diag)
             if can_diag:
@@ -496,33 +459,19 @@ class HistoryViewer(QDialog):
             else:
                 self._btn_diag_waveform.setToolTip("無診斷波形數據或檔案遺失")
         else:
-            # 一般測試場次：啟用「回看波形」，停用「回看診斷」
             self._btn_diag_waveform.setEnabled(False)
-            self._btn_diag_waveform.setToolTip("此為一般測試場次，請使用「回看波形」")
-            self._btn_waveform.setEnabled(has_file)
-            if has_file:
-                self._btn_waveform.setToolTip(f"點擊回看波形：{wf_path}")
-            else:
-                self._btn_waveform.setToolTip("無波形數據（僅 FAIL 場次會儲存）")
+            self._btn_diag_waveform.setToolTip("此為一般測試場次，無診斷波形")
 
     def _show_detail(self, rec: Dict[str, Any]):
         """在詳細資訊框顯示單筆記錄"""
         is_diag  = (rec.get("session_type") == "diagnostic")
-        hall_rate = (rec.get("hall_pass_rate") or 0) * 100
-        enc_rate  = (rec.get("enc_pass_rate")  or 0) * 100
-        overall   = "✔ PASS" if rec.get("overall_pass") == 1 else (
-                    "✘ FAIL" if rec.get("hall_total") is not None else "---")
-
         duration = rec.get("duration_s")
-        dur_str = f"{duration:.0f} 秒 ({duration/60:.1f} 分鐘)" if duration else "---"
+        dur_str  = f"{duration:.0f} 秒 ({duration/60:.1f} 分鐘)" if duration else "---"
 
         # 波形資訊
         wf_path = rec.get("waveform_path") or ""
         if wf_path and os.path.isfile(wf_path):
-            if is_diag:
-                wf_str = f"🔬 有診斷波形（{Path(wf_path).name}）"
-            else:
-                wf_str = f"📈 有波形數據（{Path(wf_path).name}）"
+            wf_str = f"🔬 有診斷波形（{Path(wf_path).name}）" if is_diag else f"📈 有波形數據（{Path(wf_path).name}）"
         elif wf_path:
             wf_str = f"⚠ 波形檔案遺失（{wf_path}）"
         else:
@@ -541,107 +490,50 @@ class HistoryViewer(QDialog):
             else:
                 diag_result_str = "— 尚未分析"
 
-            # 各通道結果
-            ch_results_str = ""
-            diag_ch_results = rec.get("diag_ch_results") or ""
-            if diag_ch_results:
-                try:
-                    ch_data = json.loads(diag_ch_results)
-                    lines = []
-                    for ch_name, info in ch_data.items():
-                        ch_pass = "✔" if info.get("pass") else "✘"
-                        h_ratio = info.get("h_ratio", 0) * 100
-                        l_ratio = info.get("l_ratio", 0) * 100
-                        x_ratio = info.get("x_ratio", 0) * 100
-                        edges   = info.get("edges", 0)
-                        freq    = info.get("freq_hz", 0)
-                        reasons = info.get("fail_reasons", [])
-                        reason_str = f"  ⚠ {'; '.join(reasons)}" if reasons else ""
-                        lines.append(
-                            f"  {ch_pass} {ch_name:<12} "
-                            f"H:{h_ratio:5.1f}%  L:{l_ratio:5.1f}%  X:{x_ratio:5.1f}%  "
-                            f"邊緣:{edges:4d}  頻率:{freq:7.1f}Hz{reason_str}"
-                        )
-                    ch_results_str = "\n各通道分析：\n" + "\n".join(lines)
-                except (json.JSONDecodeError, Exception):
-                    ch_results_str = ""
+            # 優先顯示完整診斷摘要（diag_summary），fallback 到舊格式 diag_ch_results
+            diag_summary = rec.get("diag_summary") or ""
+            if diag_summary:
+                # 新格式：完整摘要文字（含比值交叉驗證、fail 原因）
+                detail_block = f"\n─── 診斷分析報告 ───\n{diag_summary}"
+            else:
+                # 舊格式 fallback：逐通道簡表
+                diag_ch_results = rec.get("diag_ch_results") or ""
+                if diag_ch_results:
+                    try:
+                        ch_data = json.loads(diag_ch_results)
+                        lines = []
+                        for ch_name, info in ch_data.items():
+                            ch_pass = "✔" if info.get("pass") else "✘"
+                            freq    = info.get("avg_freq", 0)
+                            lines.append(f"  {ch_pass} {ch_name:<12}  主頻: {freq:.1f} Hz")
+                        detail_block = "\n各通道摘要（舊格式）：\n" + "\n".join(lines)
+                    except (json.JSONDecodeError, Exception):
+                        detail_block = ""
+                else:
+                    detail_block = "\n（無詳細分析資料）"
 
             text = (
-                f"🔬 診斷場次 #{rec.get('id')}  |  操作員: {rec.get('operator') or '(無)'}\n"
+                f"🔬 診斷場次 #{rec.get('id')}  |  序號: {rec.get('serial_no') or '(無)'}  "
+                f"|  操作員: {rec.get('operator') or '(無)'}\n"
                 f"開始: {rec.get('started_at', '---')}  |  "
                 f"結束: {rec.get('ended_at', '---')}  |  時長: {dur_str}\n"
-                f"\n"
                 f"診斷說明：{notes}\n"
-                f"\n"
                 f"診斷結果：{diag_result_str}"
-                f"{ch_results_str}\n"
-                f"\n"
-                f"波形數據：{wf_str}"
+                f"{detail_block}\n"
+                f"\n波形數據：{wf_str}"
             )
         else:
-            # 一般測試場次詳細資訊
+            # 一般測試場次詳細資訊（精簡版，無成功率/RPM）
+            overall = "✔ PASS" if rec.get("overall_pass") == 1 else (
+                      "✘ FAIL" if rec.get("hall_total") is not None else "---")
             text = (
                 f"場次 #{rec.get('id')}  |  序號: {rec.get('serial_no') or '(無)'}  "
                 f"|  操作員: {rec.get('operator') or '(無)'}\n"
                 f"開始: {rec.get('started_at', '---')}  |  "
                 f"結束: {rec.get('ended_at', '---')}  |  時長: {dur_str}\n"
-                f"\n"
-                f"Hall Sensor：\n"
-                f"  總採樣 {rec.get('hall_total', 0)} 次  |  "
-                f"PASS {rec.get('hall_pass', 0)} 次  |  "
-                f"FAIL {rec.get('hall_fail', 0)} 次  |  "
-                f"成功率 {hall_rate:.2f}%\n"
-                f"\n"
-                f"Encoder：\n"
-                f"  總採樣 {rec.get('enc_total', 0)} 次  |  "
-                f"PASS {rec.get('enc_pass', 0)} 次  |  "
-                f"FAIL {rec.get('enc_fail', 0)} 次  |  "
-                f"成功率 {enc_rate:.2f}%\n"
-                f"\n"
-                f"轉速：平均 {rec.get('avg_rpm', 0):.1f} RPM  |  "
-                f"最高 {rec.get('max_rpm', 0):.1f} RPM  |  "
-                f"最低 {rec.get('min_rpm', 0):.1f} RPM\n"
-                f"\n"
-                f"整體結果：{overall}\n"
-                f"波形數據：{wf_str}"
+                f"\n整體結果：{overall}"
             )
         self._detail_text.setPlainText(text)
-
-    def _on_view_waveform(self):
-        """開啟一般 FAIL 波形回放對話框"""
-        row = self._table.currentRow()
-        if row < 0 or row >= len(self._records):
-            QMessageBox.information(self, "提示", "請先選取要回看的記錄")
-            return
-
-        rec = self._records[row]
-        wf_path = rec.get("waveform_path") or ""
-
-        if not wf_path:
-            QMessageBox.information(
-                self, "提示",
-                "此場次無波形數據。\n\n"
-                "只有判定為 FAIL 的場次才會自動儲存波形數據。"
-            )
-            return
-
-        if not os.path.isfile(wf_path):
-            QMessageBox.warning(
-                self, "警告",
-                f"波形檔案不存在：\n{wf_path}\n\n"
-                "檔案可能已被移動或刪除。"
-            )
-            return
-
-        try:
-            dlg = WaveformReplayDialog(
-                waveform_path=wf_path,
-                session_info=rec,
-                parent=self
-            )
-            dlg.exec_()
-        except Exception as e:
-            QMessageBox.critical(self, "錯誤", f"開啟波形回放失敗：\n{e}")
 
     def _on_view_diag_waveform(self):
         """開啟診斷波形回放對話框"""
@@ -697,32 +589,29 @@ class HistoryViewer(QDialog):
                 writer = csv.writer(f)
                 # 標頭
                 writer.writerow([
-                    "ID", "開始時間", "結束時間", "馬達序號", "操作員",
-                    "時長(秒)",
-                    "Hall 總採樣", "Hall PASS", "Hall FAIL", "Hall 成功率(%)",
-                    "Enc 總採樣",  "Enc PASS",  "Enc FAIL",  "Enc 成功率(%)",
-                    "平均 RPM", "最高 RPM", "最低 RPM", "整體結果"
+                    "ID", "類型", "開始時間", "結束時間", "馬達序號", "操作員",
+                    "時長(秒)", "整體結果", "診斷摘要"
                 ])
                 for rec in self._records:
+                    is_diag = (rec.get("session_type") == "diagnostic")
+                    if is_diag:
+                        diag_pass = rec.get("diag_pass", -1)
+                        result_str = "PASS" if diag_pass == 1 else ("FAIL" if diag_pass == 0 else "未分析")
+                        # 匯出完整摘要（換行轉為空格，避免 CSV 格式問題）
+                        summary = (rec.get("diag_summary") or "").replace("\n", " | ")
+                    else:
+                        result_str = "PASS" if rec.get("overall_pass") == 1 else "FAIL"
+                        summary = ""
                     writer.writerow([
                         rec.get("id", ""),
+                        "診斷" if is_diag else "測試",
                         rec.get("started_at", ""),
                         rec.get("ended_at", ""),
                         rec.get("serial_no", ""),
                         rec.get("operator", ""),
                         rec.get("duration_s", ""),
-                        rec.get("hall_total", 0),
-                        rec.get("hall_pass", 0),
-                        rec.get("hall_fail", 0),
-                        f"{(rec.get('hall_pass_rate') or 0)*100:.2f}",
-                        rec.get("enc_total", 0),
-                        rec.get("enc_pass", 0),
-                        rec.get("enc_fail", 0),
-                        f"{(rec.get('enc_pass_rate') or 0)*100:.2f}",
-                        f"{rec.get('avg_rpm', 0):.1f}",
-                        f"{rec.get('max_rpm', 0):.1f}",
-                        f"{rec.get('min_rpm', 0):.1f}",
-                        "PASS" if rec.get("overall_pass") == 1 else "FAIL",
+                        result_str,
+                        summary,
                     ])
             QMessageBox.information(self, "成功", f"已匯出 {len(self._records)} 筆記錄至：\n{path}")
         except Exception as e:

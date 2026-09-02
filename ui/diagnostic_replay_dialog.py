@@ -149,6 +149,7 @@ class DiagnosticReplayDialog(QDialog):
         self._current_round_idx = 0
         self._current_pos       = 0
         self._window_size       = DEFAULT_WINDOW_SIZE
+        self._show_all_mode     = False   # 是否處於「顯示全部」模式
 
         # 播放
         self._play_timer = QTimer(self)
@@ -264,6 +265,10 @@ class DiagnosticReplayDialog(QDialog):
         self._plot.showGrid(x=True, y=True, alpha=0.3)
         self._plot.addLegend(offset=(10, 10))
         self._plot.getViewBox().setMouseEnabled(x=True, y=False)
+
+        # 監聽使用者用滾輪/拖曳改變 X 軸範圍，同步更新 _current_pos 並離開全部顯示模式
+        self._plot.getViewBox().sigXRangeChanged.connect(self._on_xrange_changed)
+        self._xrange_updating = False   # 防止 _refresh_plot 觸發的 setXRange 造成遞迴
 
         # 波形曲線（初始空）
         self._curve = self._plot.plot(
@@ -453,33 +458,51 @@ class DiagnosticReplayDialog(QDialog):
             self._pos_lbl.setText("無資料")
             return
 
-        n   = len(data)
-        pos = self._current_pos
-        end = min(pos + self._window_size, n)
-        x   = np.arange(pos, end)
+        n = len(data)
 
-        self._curve.setData(x, data[pos:end])
-        self._plot.setXRange(pos, end, padding=0.02)
+        # 防止 setXRange 觸發 sigXRangeChanged 造成遞迴
+        self._xrange_updating = True
+        try:
+            if self._show_all_mode:
+                # 全部顯示模式：畫出完整波形
+                x = np.arange(n)
+                self._curve.setData(x, data)
+                self._plot.setXRange(0, n, padding=0.02)
+                self._pos_lbl.setText(f"位置: 0 ~ {n:,} / {n:,}（全部）")
+                self._time_lbl.setText("時間: 0.000 s")
+                self._slider.blockSignals(True)
+                self._slider.setValue(0)
+                self._slider.blockSignals(False)
+            else:
+                # 視窗模式：只顯示 window_size 範圍
+                pos = self._current_pos
+                end = min(pos + self._window_size, n)
+                x   = np.arange(pos, end)
 
-        # 更新位置標籤
-        self._pos_lbl.setText(f"位置: {pos:,} ~ {end:,} / {n:,}")
+                self._curve.setData(x, data[pos:end])
+                self._plot.setXRange(pos, end, padding=0.02)
 
-        # 更新時間標籤（基於取樣率）
-        sr = self._diag_data["sample_rate"]
-        t_s = pos / sr
-        self._time_lbl.setText(f"時間: {t_s:.3f} s")
+                # 更新位置標籤
+                self._pos_lbl.setText(f"位置: {pos:,} ~ {end:,} / {n:,}")
 
-        # 同步滑桿
-        self._slider.blockSignals(True)
-        self._slider.setValue(pos)
-        self._slider.blockSignals(False)
+                # 更新時間標籤（基於取樣率）
+                sr = self._diag_data["sample_rate"]
+                t_s = pos / sr
+                self._time_lbl.setText(f"時間: {t_s:.3f} s")
+
+                # 同步滑桿
+                self._slider.blockSignals(True)
+                self._slider.setValue(pos)
+                self._slider.blockSignals(False)
+        finally:
+            self._xrange_updating = False
 
     def _update_channel_display(self):
-        """切換通道時更新圖表設定（顏色、閾值線、Y 軸）"""
+        """切換通道時更新圖表設定（顏色、閾值線、Y 軸），並重繪波形"""
         if self._diag_data is None:
             return
 
-        ch_idx  = self._current_ch_idx
+        ch_idx   = self._current_ch_idx
         ch_names = self._diag_data["channel_names"]
         ch_nums  = self._diag_data["channel_nums"]
 
@@ -489,10 +512,15 @@ class DiagnosticReplayDialog(QDialog):
         ch_name = str(ch_names[ch_idx])
         ch_num  = int(ch_nums[ch_idx])
 
-        # 更新顏色
+        # 更新顏色與圖例名稱
         color = CH_COLORS.get(ch_num, "#AAAAAA")
         self._curve.setPen(pg.mkPen(color, width=1))
-        self._curve.setName(ch_name)
+        # PlotDataItem 無 setName()，透過 opts 更新後重設 legend
+        self._curve.opts["name"] = ch_name
+        legend = self._plot.legend
+        if legend is not None:
+            legend.removeItem(self._curve)
+            legend.addItem(self._curve, ch_name)
 
         # 更新 Y 軸與閾值線
         if ch_num < 3:  # Hall
@@ -519,7 +547,7 @@ class DiagnosticReplayDialog(QDialog):
             f"{self._diag_data['sample_rate']:,} Hz</span>"
         )
 
-        # 更新滑桿範圍
+        # 取得新通道資料長度
         key  = f"ch{ch_idx}_round{self._current_round_idx}"
         data = self._diag_data["data"].get(key)
         n    = len(data) if data is not None else 0
@@ -532,26 +560,24 @@ class DiagnosticReplayDialog(QDialog):
             f"取樣率 {self._diag_data['sample_rate']:,} Hz"
         )
 
+        # 更新滑桿範圍，保留目前位置（clamp 到合法範圍）
         max_pos = max(0, n - self._window_size)
-        self._slider.setMaximum(max_pos)
-        self._current_pos = 0
-        self._slider.setValue(0)
+        self._current_pos = min(self._current_pos, max_pos)
 
+        self._slider.blockSignals(True)
+        self._slider.setMaximum(max_pos)
+        self._slider.setValue(self._current_pos)
+        self._slider.blockSignals(False)
+
+        # 直接重繪波形（_show_all_mode 狀態由 _refresh_plot 自行判斷）
         self._refresh_plot()
 
     def _show_all(self):
-        """顯示完整波形"""
+        """顯示完整波形，並進入「全部顯示」模式"""
         if self._diag_data is None:
             return
-        key  = f"ch{self._current_ch_idx}_round{self._current_round_idx}"
-        data = self._diag_data["data"].get(key)
-        if data is None or len(data) == 0:
-            return
-        n = len(data)
-        x = np.arange(n)
-        self._curve.setData(x, data)
-        self._plot.setXRange(0, n, padding=0.02)
-        self._pos_lbl.setText(f"位置: 0 ~ {n:,} / {n:,}（全部）")
+        self._show_all_mode = True   # 設定旗標，切換 channel 後仍維持全部顯示
+        self._refresh_plot()
 
     # ─── 事件處理 ──────────────────────────────────────────────────────────────
 
@@ -559,17 +585,60 @@ class DiagnosticReplayDialog(QDialog):
         if row < 0:
             return
         self._current_ch_idx = row
-        self._current_pos    = 0
+        # 不重設 _current_pos，保留目前觀看位置
         self._update_channel_display()
 
     def _on_round_selected(self, row: int):
         if row < 0:
             return
         self._current_round_idx = row
-        self._current_pos       = 0
+        # 不重設 _current_pos，保留目前觀看位置
         self._update_channel_display()
 
+    def _on_xrange_changed(self, view_box, x_range):
+        """使用者用滾輪或拖曳改變 X 軸範圍時，同步 _current_pos/_window_size 並離開全部顯示模式"""
+        if self._xrange_updating:
+            return   # 由 _refresh_plot 觸發的 setXRange，忽略
+        if self._diag_data is None:
+            return
+
+        x_min, x_max = x_range
+        new_pos      = max(0, int(x_min))
+        # 同步視窗大小為目前視圖寬度，clamp 到 SpinBox 合法範圍
+        new_win_size = max(
+            self._window_spin.minimum(),
+            min(self._window_spin.maximum(), int(x_max - x_min))
+        )
+
+        key  = f"ch{self._current_ch_idx}_round{self._current_round_idx}"
+        data = self._diag_data["data"].get(key)
+        n    = len(data) if data is not None else 0
+
+        self._show_all_mode = False   # 使用者手動縮放，離開全部顯示模式
+        self._window_size   = new_win_size
+        self._current_pos   = min(new_pos, max(0, n - new_win_size))
+
+        # 同步 SpinBox（不觸發 _on_window_size_changed）
+        self._window_spin.blockSignals(True)
+        self._window_spin.setValue(new_win_size)
+        self._window_spin.blockSignals(False)
+
+        # 同步滑桿（不觸發 _on_slider_changed）
+        max_pos = max(0, n - new_win_size)
+        self._slider.blockSignals(True)
+        self._slider.setMaximum(max_pos)
+        self._slider.setValue(self._current_pos)
+        self._slider.blockSignals(False)
+
+        # 更新位置標籤
+        if n > 0:
+            end = min(self._current_pos + new_win_size, n)
+            self._pos_lbl.setText(f"位置: {self._current_pos:,} ~ {end:,} / {n:,}")
+            sr = self._diag_data["sample_rate"]
+            self._time_lbl.setText(f"時間: {self._current_pos / sr:.3f} s")
+
     def _on_slider_changed(self, value: int):
+        self._show_all_mode = False   # 拖動滑桿時離開全部顯示模式
         self._current_pos = value
         self._refresh_plot()
 
@@ -609,15 +678,18 @@ class DiagnosticReplayDialog(QDialog):
             return
         n    = len(data)
         step = self._speed_spin.value()
+        self._show_all_mode = False   # 前進時離開全部顯示模式
         self._current_pos = min(self._current_pos + step, max(0, n - self._window_size))
         self._refresh_plot()
 
     def _on_step_back(self):
+        self._show_all_mode = False   # 後退時離開全部顯示模式
         step = self._speed_spin.value()
         self._current_pos = max(0, self._current_pos - step)
         self._refresh_plot()
 
     def _go_to(self, pos: int):
+        self._show_all_mode = False   # 跳至指定位置時離開全部顯示模式
         self._current_pos = pos
         self._refresh_plot()
 
@@ -629,6 +701,7 @@ class DiagnosticReplayDialog(QDialog):
         if data is None:
             return
         n = len(data)
+        self._show_all_mode = False   # 跳至結尾時離開全部顯示模式
         self._current_pos = max(0, n - self._window_size)
         self._refresh_plot()
 

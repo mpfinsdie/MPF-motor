@@ -98,6 +98,8 @@ class DatabaseManager:
             # 診斷 PASS/FAIL 欄位（診斷場次用）
             self._migrate_add_column(conn, "test_sessions", "diag_pass",       "INTEGER DEFAULT -1")
             self._migrate_add_column(conn, "test_sessions", "diag_ch_results", "TEXT DEFAULT ''")
+            # 診斷完整摘要文字（含比值交叉驗證、fail 原因，供歷史記錄回看）
+            self._migrate_add_column(conn, "test_sessions", "diag_summary",    "TEXT DEFAULT ''")
         print(f"[DB] 資料庫已初始化: {self._db_path}")
 
     def _migrate_add_column(self, conn: sqlite3.Connection, table: str, column: str, col_def: str):
@@ -360,6 +362,9 @@ class DatabaseManager:
                     s.notes                 AS session_notes,
                     s.waveform_path,
                     s.session_type,
+                    s.diag_pass,
+                    s.diag_ch_results,
+                    s.diag_summary,
                     r.hall_total,
                     r.hall_pass,
                     r.hall_fail,
@@ -386,18 +391,20 @@ class DatabaseManager:
     def create_diagnostic_session(
         self,
         operator: str = "",
-        notes: str = ""
+        notes: str = "",
+        serial_no: str = ""
     ) -> int:
         """
         建立診斷場次（session_type='diagnostic'）
         Args:
-            operator: 操作員名稱
-            notes:    備註
+            operator:  操作員名稱
+            notes:     備註
+            serial_no: 馬達序號（由參數設置帶入，留空時顯示為「[診斷]」）
         Returns:
             int: 新建場次的 ID
         """
         return self.create_session(
-            serial_no="[診斷]",
+            serial_no=serial_no if serial_no else "[診斷]",
             operator=operator,
             notes=notes,
             session_type="diagnostic"
@@ -411,7 +418,8 @@ class DatabaseManager:
         completed: bool,
         rounds_done: int,
         diag_pass: bool = None,
-        diag_ch_results: str = ""
+        diag_ch_results: str = "",
+        diag_summary: str = ""
     ):
         """
         結束診斷場次，記錄結束時間、波形路徑、完成狀態與診斷 PASS/FAIL 結果
@@ -423,7 +431,8 @@ class DatabaseManager:
             completed:        是否跑完所有輪次
             rounds_done:      已完成輪數
             diag_pass:        診斷整體 PASS/FAIL（None 表示未分析）
-            diag_ch_results:  各通道診斷結果 JSON 字串（供歷史記錄顯示）
+            diag_ch_results:  各通道診斷結果 JSON 字串（供歷史記錄顯示，舊格式相容）
+            diag_summary:     完整診斷摘要文字（含比值交叉驗證、fail 原因，供歷史記錄回看）
         """
         ended_at = datetime.now().isoformat(timespec="seconds")
         notes = f"完成={'是' if completed else '否（提早停止）'}，已完成 {rounds_done} 輪"
@@ -437,10 +446,10 @@ class DatabaseManager:
             conn.execute(
                 """UPDATE test_sessions
                    SET ended_at = ?, duration_s = ?, waveform_path = ?, notes = ?,
-                       diag_pass = ?, diag_ch_results = ?
+                       diag_pass = ?, diag_ch_results = ?, diag_summary = ?
                    WHERE id = ?""",
                 (ended_at, duration_s, npz_path or "", notes,
-                 diag_pass_int, diag_ch_results or "", session_id)
+                 diag_pass_int, diag_ch_results or "", diag_summary or "", session_id)
             )
         print(
             f"[DB] 診斷場次 #{session_id} 已結束，"

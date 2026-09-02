@@ -8,9 +8,9 @@
   - 每 0.1 秒（20,000 點）分段串流回呼，供 UI 即時繪製波形
   - 全部資料合併存成單一 .npz 檔案，含 metadata
 
-資料量估算（200kHz × 10s × 5CH × 2輪）：
-  每通道：200,000 × 10 = 2,000,000 點 ≈ 7.6 MB (float32)
-  全部：  5 × 2 × 7.6 MB ≈ 76 MB（壓縮後約 10~20 MB）
+資料量估算（200kHz × 2s × 5CH × 2輪）：
+  每通道：200,000 × 2 = 400,000 點 ≈ 1.5 MB (float32)
+  全部：  5 × 2 × 1.5 MB ≈ 15 MB（壓縮後約 2~4 MB）
 
 架構：
   真實硬體：WaveformAiCtrl 單通道高速採樣
@@ -459,6 +459,11 @@ class DiagnosticScanner:
         """
         產生模擬波形 chunk（高取樣率，含雜訊）
 
+        模擬頻率依馬達規格參數動態計算，確保 Hall/Encoder 比值正確：
+            Hall 基頻  = hall_pulses_per_rev × 模擬轉速(rps)
+            Encoder 頻率 = ppr × 模擬轉速(rps)
+            比值 = ppr / hall_pulses_per_rev（與理論比值一致）
+
         Args:
             ch_num:    AI 通道編號（0~4）
             t_offset:  此 chunk 的起始時間偏移（秒）
@@ -475,15 +480,25 @@ class DiagnosticScanner:
             dtype=np.float64
         )
 
-        # 頻率隨輪次略有不同（模擬真實馬達轉速變化）
+        # 頻率隨輪次略有不同（模擬真實馬達轉速變化，±5%）
         freq_factor = 1.0 + round_idx * 0.05
+
+        # ── 從 thresholds 讀取馬達規格，確保模擬比值與理論比值一致 ──────────
+        # 模擬轉速：假設 1 rps（60 RPM），可依需求調整
+        sim_rps = 1.0  # 模擬轉速（轉/秒）
+        hall_pulses_per_rev = HALL_THRESHOLDS.get("hall_pulses_per_rev", 90)
+        enc_ppr             = ENCODER_THRESHOLDS.get("ppr", 512)
+
+        # Hall 基頻 = hall_pulses_per_rev × rps（例：90 × 1 = 90 Hz）
+        hall_base_freq = hall_pulses_per_rev * sim_rps * freq_factor
+        # Encoder 頻率 = ppr × rps（例：512 × 1 = 512 Hz）
+        enc_base_freq  = enc_ppr * sim_rps * freq_factor
 
         if ch_num < 3:
             # Hall U/V/W：3.3V 方波，三相相差 120 度
-            phase = ch_num * 2.094  # 120 度
-            freq  = 50.0 * freq_factor  # 50 Hz 基頻
+            phase = ch_num * 2.094  # 120 度（2π/3）
             signal = np.where(
-                np.sin(2 * math.pi * freq * t + phase) > 0,
+                np.sin(2 * math.pi * hall_base_freq * t + phase) > 0,
                 3.3, 0.0
             )
             # 加入上升/下降邊緣模糊（RC 濾波效果）
@@ -492,10 +507,9 @@ class DiagnosticScanner:
             signal = np.clip(signal, 0.0, 3.5).astype(np.float32)
 
         elif ch_num == 3:
-            # Encoder A：5V 方波，較高頻
-            freq = 500.0 * freq_factor  # 500 Hz
+            # Encoder A：5V 方波
             signal = np.where(
-                np.sin(2 * math.pi * freq * t) > 0,
+                np.sin(2 * math.pi * enc_base_freq * t) > 0,
                 5.0, 0.0
             )
             noise = np.random.normal(0, 0.03, self._chunk_size)
@@ -503,10 +517,9 @@ class DiagnosticScanner:
             signal = np.clip(signal, 0.0, 5.5).astype(np.float32)
 
         else:
-            # Encoder B：5V 方波，與 A 相差 90 度
-            freq = 500.0 * freq_factor
+            # Encoder B：5V 方波，與 A 相差 90 度（正交訊號）
             signal = np.where(
-                np.sin(2 * math.pi * freq * t - math.pi / 2) > 0,
+                np.sin(2 * math.pi * enc_base_freq * t - math.pi / 2) > 0,
                 5.0, 0.0
             )
             noise = np.random.normal(0, 0.03, self._chunk_size)
@@ -523,7 +536,7 @@ class DiagnosticScanner:
 
         npz 格式：
           ch{i}_round{j}:  np.ndarray float32，長度 = total_pts_per_ch（或更短若提早停止）
-                           200kHz × 10s = 2,000,000 點/通道（約 7.6 MB float32）
+                           200kHz × 2s = 400,000 點/通道（約 1.5 MB float32）
           sample_rate:     np.array([200000])
           seconds_per_ch:  np.array([10])
           rounds:          np.array([2])
@@ -567,6 +580,21 @@ class DiagnosticScanner:
                 [ch["ch"] for ch in self._channels], dtype=np.int32
             )
             save_dict["diag_type"]      = np.array(["sequential_ch"])
+
+            # ── 馬達規格參數（供回放分析時還原比值交叉驗證設定）────────────────
+            save_dict["hall_pulses_per_rev"] = np.array(
+                [HALL_THRESHOLDS.get("hall_pulses_per_rev", 90)], dtype=np.int32
+            )
+            save_dict["ppr"] = np.array(
+                [ENCODER_THRESHOLDS.get("ppr", 512)], dtype=np.int32
+            )
+            save_dict["resolution_bits"] = np.array(
+                [ENCODER_THRESHOLDS.get("resolution_bits", 11)], dtype=np.int32
+            )
+            save_dict["ratio_tolerance"] = np.array(
+                [DIAGNOSTIC.get("analysis", {}).get("ratio_tolerance", 0.15)],
+                dtype=np.float32
+            )
 
             np.savez_compressed(str(filepath), **save_dict)
 
@@ -637,6 +665,24 @@ class DiagnosticScanner:
         channel_names  = list(raw["channel_names"])    if "channel_names"  in raw else []
         channel_nums   = list(raw["channel_nums"])     if "channel_nums"   in raw else []
 
+        # ── 馬達規格參數（新格式才有，舊格式 fallback 到 None 由呼叫端處理）──
+        hall_pulses_per_rev = (
+            int(raw["hall_pulses_per_rev"][0])
+            if "hall_pulses_per_rev" in raw else None
+        )
+        ppr = (
+            int(raw["ppr"][0])
+            if "ppr" in raw else None
+        )
+        resolution_bits = (
+            int(raw["resolution_bits"][0])
+            if "resolution_bits" in raw else None
+        )
+        ratio_tolerance = (
+            float(raw["ratio_tolerance"][0])
+            if "ratio_tolerance" in raw else None
+        )
+
         data = {}
         for round_idx in range(rounds):
             for ch_idx in range(ch_count):
@@ -645,14 +691,19 @@ class DiagnosticScanner:
                     data[key] = raw[key]
 
         return {
-            "diag_type":      diag_type,
-            "sample_rate":    sample_rate,
-            "seconds_per_ch": seconds_per_ch,
-            "rounds":         rounds,
-            "ch_count":       ch_count,
-            "channel_names":  channel_names,
-            "channel_nums":   channel_nums,
-            "data":           data,
+            "diag_type":           diag_type,
+            "sample_rate":         sample_rate,
+            "seconds_per_ch":      seconds_per_ch,
+            "rounds":              rounds,
+            "ch_count":            ch_count,
+            "channel_names":       channel_names,
+            "channel_nums":        channel_nums,
+            "data":                data,
+            # 馬達規格參數（None 表示舊格式 npz，由呼叫端 fallback 到 thresholds 預設值）
+            "hall_pulses_per_rev": hall_pulses_per_rev,
+            "ppr":                 ppr,
+            "resolution_bits":     resolution_bits,
+            "ratio_tolerance":     ratio_tolerance,
         }
 
     @staticmethod
