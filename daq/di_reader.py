@@ -2,6 +2,11 @@
 數位輸入讀取模組
 負責從 USB-4716 DI 通道讀取 Hall Sensor H/L 狀態與 Encoder 脈波
 支援軟體計數器（Encoder A/B 正交解碼）
+
+通道對應：
+  由 config.channel_config.CHANNEL_CONFIG 動態提供，使用者可透過 UI
+  「硬體通道設定」或直接編輯 config/channel_map.json 調整 DI 通道，
+  不再固定為 DI0~4。呼叫 refresh_channels() 可於執行期套用新設定。
 """
 
 import time
@@ -11,6 +16,7 @@ from collections import deque
 from typing import Callable, Optional
 
 from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, SAMPLING
+from config.channel_config import CHANNEL_CONFIG
 
 
 class DIReader:
@@ -18,10 +24,9 @@ class DIReader:
     數位輸入讀取器
     - 讀取 Hall U/V/W 的 H/L 狀態
     - 讀取 Encoder A/B 並進行軟體正交解碼（計數、方向、RPM）
-    """
 
-    HALL_DI_CHANNELS = list(HALL_THRESHOLDS["di_channels"].values())       # [0, 1, 2]
-    ENCODER_DI_CHANNELS = list(ENCODER_THRESHOLDS["di_channels"].values()) # [3, 4]
+    通道對應由 CHANNEL_CONFIG 動態提供，可用 refresh_channels() 熱更新。
+    """
 
     # 正交解碼狀態機查表（A_prev, B_prev, A_curr, B_curr）→ 計數增量
     QUADRATURE_TABLE = {
@@ -45,11 +50,32 @@ class DIReader:
         self._buffer_size = SAMPLING["buffer_size"]
         self._ppr = ENCODER_THRESHOLDS["ppr"]
 
+        # 執行緒控制
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+        # 回呼
+        self._on_data_callback: Optional[Callable] = None
+
+        # 依 CHANNEL_CONFIG 建立通道結構與狀態
+        self._build_channel_state()
+
+    # ─── 通道結構建立 / 熱更新 ──────────────────────────────────────────────────
+
+    def _build_channel_state(self):
+        """依 CHANNEL_CONFIG 目前設定建立 DI 通道清單、緩衝與狀態"""
+        self._hall_di_channels    = [CHANNEL_CONFIG.hall_di(s) for s in ("U", "V", "W")]
+        self._encoder_di_channels = [CHANNEL_CONFIG.encoder_di(s) for s in ("A", "B")]
+        self._di_port = CHANNEL_CONFIG.di_port()
+
         # Hall 狀態緩衝
         self._hall_buffers: dict[int, deque] = {
-            ch: deque(maxlen=self._buffer_size) for ch in self.HALL_DI_CHANNELS
+            ch: deque(maxlen=self._buffer_size) for ch in self._hall_di_channels
         }
-        self._hall_latest: dict[int, bool] = {ch: False for ch in self.HALL_DI_CHANNELS}
+        self._hall_latest: dict[int, bool] = {
+            ch: False for ch in self._hall_di_channels
+        }
 
         # Encoder 狀態
         self._enc_count: int = 0          # 累計脈波計數
@@ -72,13 +98,32 @@ class DIReader:
         # 時間戳記
         self._timestamps: deque = deque(maxlen=self._buffer_size)
 
-        # 執行緒控制
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+    def refresh_channels(self):
+        """
+        於執行期套用新的通道設定（使用者透過 UI 修改通道後呼叫）。
+        會停止目前讀取（若正在執行）、重建通道結構後重啟。
+        """
+        was_running = self._running
+        if was_running:
+            self.stop()
+        with self._lock:
+            self._build_channel_state()
+        print(
+            f"[DIReader] 通道設定已更新 | "
+            f"Hall DI={self._hall_di_channels} | "
+            f"Encoder DI={self._encoder_di_channels} | Port={self._di_port}"
+        )
+        if was_running:
+            self.start()
 
-        # 回呼
-        self._on_data_callback: Optional[Callable] = None
+    # 相容屬性（供外部參考目前通道）
+    @property
+    def HALL_DI_CHANNELS(self):
+        return self._hall_di_channels
+
+    @property
+    def ENCODER_DI_CHANNELS(self):
+        return self._encoder_di_channels
 
     def set_data_callback(self, callback: Callable):
         """設定資料更新回呼函式"""
@@ -119,15 +164,15 @@ class DIReader:
         while self._running:
             try:
                 t = time.time()
-                port_data = self._daq.read_di_port(0)
+                port_data = self._daq.read_di_port(self._di_port)
 
                 # 解析各通道
                 hall_states = {}
-                for ch in self.HALL_DI_CHANNELS:
+                for ch in self._hall_di_channels:
                     hall_states[ch] = bool((port_data >> ch) & 0x01)
 
-                enc_a = int((port_data >> self.ENCODER_DI_CHANNELS[0]) & 0x01)
-                enc_b = int((port_data >> self.ENCODER_DI_CHANNELS[1]) & 0x01)
+                enc_a = int((port_data >> self._encoder_di_channels[0]) & 0x01)
+                enc_b = int((port_data >> self._encoder_di_channels[1]) & 0x01)
 
                 with self._lock:
                     # 更新 Hall 狀態
@@ -187,9 +232,9 @@ class DIReader:
         """
         with self._lock:
             return {
-                "U": self._hall_latest[HALL_THRESHOLDS["di_channels"]["U"]],
-                "V": self._hall_latest[HALL_THRESHOLDS["di_channels"]["V"]],
-                "W": self._hall_latest[HALL_THRESHOLDS["di_channels"]["W"]],
+                "U": self._hall_latest.get(CHANNEL_CONFIG.hall_di("U"), False),
+                "V": self._hall_latest.get(CHANNEL_CONFIG.hall_di("V"), False),
+                "W": self._hall_latest.get(CHANNEL_CONFIG.hall_di("W"), False),
             }
 
     def get_encoder_state(self) -> dict:
@@ -217,8 +262,10 @@ class DIReader:
             }
 
     def get_hall_buffer(self, channel: int) -> np.ndarray:
-        """取得指定 Hall DI 通道的波形緩衝"""
+        """取得指定 Hall DI 通道的波形緩衝（通道不存在時回傳空陣列）"""
         with self._lock:
+            if channel not in self._hall_buffers:
+                return np.array([])
             return np.array(list(self._hall_buffers[channel]))
 
     def get_encoder_a_buffer(self) -> np.ndarray:

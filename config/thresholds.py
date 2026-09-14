@@ -6,26 +6,23 @@ Hall Sensor (3.3V 系統) 與 Encoder (5V 系統) 的判斷閾值
 import os
 from pathlib import Path
 
+# 硬體通道對應（使用者可透過 UI 或 config/channel_map.json 調整）
+from config.channel_config import CHANNEL_CONFIG
+
 # ─── 硬體規格常數 ────────────────────────────────────────────────────────────────
 # Advantech USB-4716 硬體最高取樣率（單通道，WaveformAiCtrl 模式）
 # 多通道同時採樣時為總取樣率共享；診斷模式為單通道，可達此上限
 HW_MAX_SAMPLE_RATE = 200_000   # 200 kS/s（每通道最高）
 
 # Hall Sensor 閾值設定（3.3V 系統）
+# 注意：channels / di_channels 由 CHANNEL_CONFIG 動態填入，
+#       使用者可透過 UI「硬體通道設定」或直接編輯 config/channel_map.json 調整
 HALL_THRESHOLDS = {
     "system_voltage": 3.3,
     "vh_min": 2.0,              # H 準位最低電壓 (V)
     "vl_max": 0.8,              # L 準位最高電壓 (V)
-    "channels": {
-        "U": 0,                 # AI Channel 0
-        "V": 1,                 # AI Channel 1
-        "W": 2,                 # AI Channel 2
-    },
-    "di_channels": {
-        "U": 0,                 # DI Channel 0
-        "V": 1,                 # DI Channel 1
-        "W": 2,                 # DI Channel 2
-    },
+    "channels":    CHANNEL_CONFIG.hall_ai_channels(),   # {"U":0,"V":1,"W":2}（動態）
+    "di_channels": CHANNEL_CONFIG.hall_di_channels(),   # {"U":0,"V":1,"W":2}（動態）
     # ── 馬達規格參數（可在「參數設置」對話框調整）────────────────────────────
     # Hall Sensor 每相每轉產生的 H-L 週期數（脈波數）
     # 例：本馬達每相每轉 90 次 High-Low，即 90 個週期
@@ -33,18 +30,13 @@ HALL_THRESHOLDS = {
 }
 
 # Encoder 閾值設定（5V 系統）
+# 注意：channels / di_channels 由 CHANNEL_CONFIG 動態填入
 ENCODER_THRESHOLDS = {
     "system_voltage": 5.0,
     "vh_min": 3.5,              # H 準位最低電壓 (V)
     "vl_max": 1.5,              # L 準位最高電壓 (V)
-    "channels": {
-        "A": 3,                 # AI Channel 3
-        "B": 4,                 # AI Channel 4
-    },
-    "di_channels": {
-        "A": 3,                 # DI Channel 3
-        "B": 4,                 # DI Channel 4
-    },
+    "channels":    CHANNEL_CONFIG.encoder_ai_channels(),  # {"A":3,"B":4}（動態）
+    "di_channels": CHANNEL_CONFIG.encoder_di_channels(),  # {"A":3,"B":4}（動態）
     # ── Encoder 規格參數（可在「參數設置」對話框調整）────────────────────────
     # resolution_bits：Encoder 解析度位元數
     #   11 bits → 每轉總計數 2^11 = 2048 counts（四倍頻後）
@@ -56,9 +48,10 @@ ENCODER_THRESHOLDS = {
 }
 
 # AI 量程設定（WaveformAiCtrl 通道量程，對應 ValueRange 枚舉）
+# 由 CHANNEL_CONFIG 動態填入，使用者可調整
 AI_RANGE = {
-    "hall":    "V_0To5",   # 0~5V 單極性（Hall 3.3V 訊號）
-    "encoder": "V_0To10",  # 0~10V 單極性（Encoder 5V 訊號）
+    "hall":    CHANNEL_CONFIG.value_range_name("hall"),     # 0~5V 單極性（Hall 3.3V 訊號）
+    "encoder": CHANNEL_CONFIG.value_range_name("encoder"),  # 0~10V 單極性（Encoder 5V 訊號）
 }
 
 # ─── 即時監控取樣設定（InstantAiCtrl 輪詢模式）────────────────────────────────
@@ -95,13 +88,9 @@ DIAGNOSTIC = {
                                   # 此值不再傳入 WaveformAiCtrl，避免硬體在 8 段後自動停止
     "display_window":    80_000,  # 即時波形顯示視窗點數（200kHz × 0.4s = 80,000 點）
                                   # = 2 秒採集的 20%，繪圖時自動 decimation 降採樣，維持 UI 流暢
-    "channels": [                 # 診斷通道清單（依序輪流採樣）
-        {"ch": 0, "name": "Hall U",    "vh_min": None, "vl_max": None, "y_range": (-0.2, 3.8)},
-        {"ch": 1, "name": "Hall V",    "vh_min": None, "vl_max": None, "y_range": (-0.2, 3.8)},
-        {"ch": 2, "name": "Hall W",    "vh_min": None, "vl_max": None, "y_range": (-0.2, 3.8)},
-        {"ch": 3, "name": "Encoder A", "vh_min": None, "vl_max": None, "y_range": (-0.5, 6.0)},
-        {"ch": 4, "name": "Encoder B", "vh_min": None, "vl_max": None, "y_range": (-0.5, 6.0)},
-    ],
+    # 診斷通道清單（依序輪流採樣）由 CHANNEL_CONFIG 動態產生，
+    # 每項含 ch/name/kind/y_range，使用者可透過 UI 或 channel_map.json 調整
+    "channels": CHANNEL_CONFIG.diagnostic_channels(),
     "diag_dir":          "data/diagnostics",  # 診斷 npz 儲存目錄（相對於專案根目錄）
 
     # ─── 高速數據診斷判斷參數（供 DiagAnalyzer 使用）────────────────────────
@@ -163,3 +152,22 @@ DATABASE = {
     # 預設測試時長（秒）
     "default_duration_s": 300,
 }
+
+
+# ─── 通道對應熱更新 ──────────────────────────────────────────────────────────────
+def refresh_channel_map():
+    """
+    依 CHANNEL_CONFIG 目前狀態，就地更新各設定字典的通道對應。
+
+    使用者透過 UI「硬體通道設定」對話框修改通道後呼叫此函式，
+    讓 HALL_THRESHOLDS / ENCODER_THRESHOLDS / AI_RANGE / DIAGNOSTIC["channels"]
+    立即反映新設定（就地更新，維持既有物件參照有效）。
+    """
+    HALL_THRESHOLDS["channels"]    = CHANNEL_CONFIG.hall_ai_channels()
+    HALL_THRESHOLDS["di_channels"] = CHANNEL_CONFIG.hall_di_channels()
+    ENCODER_THRESHOLDS["channels"]    = CHANNEL_CONFIG.encoder_ai_channels()
+    ENCODER_THRESHOLDS["di_channels"] = CHANNEL_CONFIG.encoder_di_channels()
+    AI_RANGE["hall"]    = CHANNEL_CONFIG.value_range_name("hall")
+    AI_RANGE["encoder"] = CHANNEL_CONFIG.value_range_name("encoder")
+    # DIAGNOSTIC["channels"] 需就地替換內容（保留 list 物件參照）
+    DIAGNOSTIC["channels"][:] = CHANNEL_CONFIG.diagnostic_channels()

@@ -39,6 +39,7 @@ from typing import Callable, Optional, List, Dict, Any
 import sys
 
 from config.thresholds import DIAGNOSTIC, HALL_THRESHOLDS, ENCODER_THRESHOLDS
+from config.channel_config import CHANNEL_CONFIG
 
 
 def _get_diag_dir() -> Path:
@@ -52,15 +53,22 @@ def _get_diag_dir() -> Path:
 
 # ─── 通道閾值對照（從 thresholds 動態填入）────────────────────────────────────
 def _build_channel_list() -> List[Dict[str, Any]]:
-    """建立診斷通道清單，填入對應閾值"""
+    """
+    建立診斷通道清單，填入對應閾值。
+
+    依每個通道的 kind（"hall" / "encoder"）決定閾值，不再依固定通道編號，
+    支援使用者自訂通道對應。
+    """
     channels = []
     for ch_def in DIAGNOSTIC["channels"]:
         ch = dict(ch_def)
-        idx = ch["ch"]
-        if idx < 3:  # Hall U/V/W
+        # 舊格式可能無 kind 欄位，依 name 推斷以維持相容
+        kind = ch.get("kind") or ("hall" if str(ch.get("name", "")).startswith("Hall") else "encoder")
+        ch["kind"] = kind
+        if kind == "hall":
             ch["vh_min"] = HALL_THRESHOLDS["vh_min"]
             ch["vl_max"] = HALL_THRESHOLDS["vl_max"]
-        else:        # Encoder A/B
+        else:
             ch["vh_min"] = ENCODER_THRESHOLDS["vh_min"]
             ch["vl_max"] = ENCODER_THRESHOLDS["vl_max"]
         channels.append(ch)
@@ -282,12 +290,10 @@ class DiagnosticScanner:
                 raise RuntimeError("WaveformAiCtrl 未初始化")
 
             ch_num = ch_def["ch"]
+            kind   = ch_def.get("kind", "encoder")
 
-            # ── 設定通道量程 ──────────────────────────────────────────────────
-            if ch_num < 3:
-                wfm.channels[ch_num].valueRange = ValueRange.V_0To5
-            else:
-                wfm.channels[ch_num].valueRange = ValueRange.V_0To10
+            # ── 設定通道量程（依 kind 與 CHANNEL_CONFIG，不再依固定通道編號）──
+            wfm.channels[ch_num].valueRange = CHANNEL_CONFIG.value_range(kind)
 
             # ── 設定 conversion（單通道）────────────────────────────────────
             # clamp_clock_rate 確保不超過硬體上限（enter_diag_mode 已查詢）
@@ -424,9 +430,9 @@ class DiagnosticScanner:
             if self._stop_event.is_set():
                 break
 
-            # 產生模擬波形
+            # 產生模擬波形（依 kind 與訊號索引，不依固定通道編號）
             t_offset = chunk_i * chunk_duration
-            chunk_arr = self._generate_sim_chunk(ch_num, t_offset, round_idx)
+            chunk_arr = self._generate_sim_chunk(ch_def, t_offset, round_idx)
             all_data.append(chunk_arr)
 
             elapsed_s   = time.time() - ch_start_time
@@ -452,12 +458,15 @@ class DiagnosticScanner:
 
     def _generate_sim_chunk(
         self,
-        ch_num: int,
+        ch_def: Dict[str, Any],
         t_offset: float,
         round_idx: int
     ) -> np.ndarray:
         """
         產生模擬波形 chunk（高取樣率，含雜訊）
+
+        依通道的 kind（"hall" / "encoder"）與 name 決定波形，不再依固定通道
+        編號，支援使用者自訂通道對應。
 
         模擬頻率依馬達規格參數動態計算，確保 Hall/Encoder 比值正確：
             Hall 基頻  = hall_pulses_per_rev × 模擬轉速(rps)
@@ -465,13 +474,16 @@ class DiagnosticScanner:
             比值 = ppr / hall_pulses_per_rev（與理論比值一致）
 
         Args:
-            ch_num:    AI 通道編號（0~4）
+            ch_def:    通道定義 dict（含 kind / name）
             t_offset:  此 chunk 的起始時間偏移（秒）
             round_idx: 輪次（不同輪次略微不同頻率）
 
         Returns:
             np.ndarray: float32 陣列，長度 = chunk_size
         """
+        kind = ch_def.get("kind", "encoder")
+        name = str(ch_def.get("name", ""))
+
         t = np.linspace(
             t_offset,
             t_offset + self._chunk_size / self._sample_rate,
@@ -494,9 +506,10 @@ class DiagnosticScanner:
         # Encoder 頻率 = ppr × rps（例：512 × 1 = 512 Hz）
         enc_base_freq  = enc_ppr * sim_rps * freq_factor
 
-        if ch_num < 3:
-            # Hall U/V/W：3.3V 方波，三相相差 120 度
-            phase = ch_num * 2.094  # 120 度（2π/3）
+        if kind == "hall":
+            # Hall U/V/W：3.3V 方波，三相相差 120 度（依 U/V/W 決定相位）
+            phase_map = {"U": 0.0, "V": 2.094, "W": 4.188}  # 0, 120, 240 度
+            phase = next((p for s, p in phase_map.items() if name.endswith(s)), 0.0)
             signal = np.where(
                 np.sin(2 * math.pi * hall_base_freq * t + phase) > 0,
                 3.3, 0.0
@@ -506,20 +519,11 @@ class DiagnosticScanner:
             signal = signal + noise
             signal = np.clip(signal, 0.0, 3.5).astype(np.float32)
 
-        elif ch_num == 3:
-            # Encoder A：5V 方波
-            signal = np.where(
-                np.sin(2 * math.pi * enc_base_freq * t) > 0,
-                5.0, 0.0
-            )
-            noise = np.random.normal(0, 0.03, self._chunk_size)
-            signal = signal + noise
-            signal = np.clip(signal, 0.0, 5.5).astype(np.float32)
-
         else:
-            # Encoder B：5V 方波，與 A 相差 90 度（正交訊號）
+            # Encoder A/B：5V 方波，B 相與 A 相差 90 度（正交訊號）
+            enc_phase = -math.pi / 2 if name.endswith("B") else 0.0
             signal = np.where(
-                np.sin(2 * math.pi * enc_base_freq * t - math.pi / 2) > 0,
+                np.sin(2 * math.pi * enc_base_freq * t + enc_phase) > 0,
                 5.0, 0.0
             )
             noise = np.random.normal(0, 0.03, self._chunk_size)

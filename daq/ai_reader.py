@@ -4,11 +4,16 @@
 
 架構：
   真實硬體：InstantAiCtrl 輪詢執行緒
-    背景執行緒每 10ms 呼叫 readDataF64(0, 5) → 取得 5 通道即時電壓
-    → 存入 deque → 觸發 UI callback
+    背景執行緒每 10ms 呼叫 readDataF64(start, count) → 取得涵蓋範圍通道即時電壓
+    → 從中取出所需通道 → 存入 deque → 觸發 UI callback
 
   模擬模式：保留舊的輪詢執行緒（無硬體時 UI 測試用）
     time.sleep 輪詢 → _simulate_ai() → deque
+
+通道對應：
+  由 config.channel_config.CHANNEL_CONFIG 動態提供，使用者可透過 UI
+  「硬體通道設定」或直接編輯 config/channel_map.json 調整 AI 通道，
+  不再固定為 AI0~4。呼叫 refresh_channels() 可於執行期套用新設定。
 """
 
 import time
@@ -19,21 +24,7 @@ from collections import deque
 from typing import Callable, Optional
 
 from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, SAMPLING
-
-
-# ─── 通道定義 ───────────────────────────────────────────────────────────────────
-_HALL_CHS    = list(HALL_THRESHOLDS["channels"].values())     # [0, 1, 2]
-_ENCODER_CHS = list(ENCODER_THRESHOLDS["channels"].values())  # [3, 4]
-_ALL_CHS     = _HALL_CHS + _ENCODER_CHS                       # [0, 1, 2, 3, 4]
-_CH_COUNT    = len(_ALL_CHS)                                   # 5
-
-_CHANNEL_NAMES = {
-    0: "Hall U",
-    1: "Hall V",
-    2: "Hall W",
-    3: "Encoder A",
-    4: "Encoder B",
-}
+from config.channel_config import CHANNEL_CONFIG
 
 
 class AIReader:
@@ -41,19 +32,16 @@ class AIReader:
     類比輸入讀取器（InstantAiCtrl 輪詢版）
 
     真實硬體模式：
-      - 背景執行緒每 10ms 呼叫 InstantAiCtrl.readDataF64(0, 5)
-      - 取得 5 通道即時電壓後存入 deque 並觸發 UI callback
+      - 背景執行緒每 10ms 呼叫 InstantAiCtrl.readDataF64(start, count)
+        （start~count 涵蓋所有使用者設定的 AI 通道）
+      - 取得涵蓋範圍電壓後取出所需通道存入 deque 並觸發 UI callback
       - 穩定連續，不受 WaveformAI cycles 限制
 
     模擬模式：
       - 啟動背景執行緒以 ~100 Hz 產生模擬波形資料
-    """
 
-    # 通道常數（供外部參考）
-    HALL_CHANNELS    = _HALL_CHS
-    ENCODER_CHANNELS = _ENCODER_CHS
-    ALL_CHANNELS     = _ALL_CHS
-    CHANNEL_NAMES    = _CHANNEL_NAMES
+    通道對應由 CHANNEL_CONFIG 動態提供，可用 refresh_channels() 熱更新。
+    """
 
     def __init__(self, daq_controller):
         """
@@ -63,15 +51,6 @@ class AIReader:
         self._daq         = daq_controller
         self._buffer_size = SAMPLING["buffer_size"]
 
-        # 各通道滾動緩衝區
-        self._buffers: dict[int, deque] = {
-            ch: deque(maxlen=self._buffer_size) for ch in _ALL_CHS
-        }
-        self._timestamps: deque = deque(maxlen=self._buffer_size)
-
-        # 最新讀值
-        self._latest: dict[int, float] = {ch: 0.0 for ch in _ALL_CHS}
-
         # 執行緒控制
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -79,6 +58,73 @@ class AIReader:
 
         # 資料更新回呼
         self._on_data_callback: Optional[Callable] = None
+
+        # 依 CHANNEL_CONFIG 建立通道結構
+        self._build_channel_state()
+
+    # ─── 通道結構建立 / 熱更新 ──────────────────────────────────────────────────
+
+    def _build_channel_state(self):
+        """
+        依 CHANNEL_CONFIG 目前設定建立通道清單、緩衝區與讀取範圍。
+
+        通道可能非連續（例如使用者設定 AI0,1,2,5,6），因此以 min~max
+        涵蓋範圍呼叫 readDataF64，再依實際通道編號取值。
+        """
+        self._hall_chs    = [CHANNEL_CONFIG.hall_ai(s) for s in ("U", "V", "W")]
+        self._encoder_chs = [CHANNEL_CONFIG.encoder_ai(s) for s in ("A", "B")]
+        self._all_chs     = self._hall_chs + self._encoder_chs
+
+        # 讀取涵蓋範圍（含中間未使用的通道，一次讀取後再挑選）
+        self._read_start = min(self._all_chs)
+        self._read_count = max(self._all_chs) - self._read_start + 1
+
+        self._channel_names = CHANNEL_CONFIG.channel_names()
+
+        # 各通道滾動緩衝區
+        self._buffers: dict[int, deque] = {
+            ch: deque(maxlen=self._buffer_size) for ch in self._all_chs
+        }
+        self._timestamps: deque = deque(maxlen=self._buffer_size)
+
+        # 最新讀值
+        self._latest: dict[int, float] = {ch: 0.0 for ch in self._all_chs}
+
+    def refresh_channels(self):
+        """
+        於執行期套用新的通道設定（使用者透過 UI 修改通道後呼叫）。
+
+        會停止目前讀取（若正在執行）、重建通道結構，並在真實硬體模式下
+        重新設定量程後重啟輪詢。
+        """
+        was_running = self._running
+        if was_running:
+            self.stop()
+        with self._lock:
+            self._build_channel_state()
+        print(
+            f"[AIReader] 通道設定已更新 | "
+            f"Hall AI={self._hall_chs} | Encoder AI={self._encoder_chs}"
+        )
+        if was_running:
+            self.start()
+
+    # 相容屬性（供外部參考目前通道）
+    @property
+    def HALL_CHANNELS(self):
+        return self._hall_chs
+
+    @property
+    def ENCODER_CHANNELS(self):
+        return self._encoder_chs
+
+    @property
+    def ALL_CHANNELS(self):
+        return self._all_chs
+
+    @property
+    def CHANNEL_NAMES(self):
+        return self._channel_names
 
     def set_data_callback(self, callback: Callable):
         """設定資料更新回呼函式，每次收到新資料後呼叫"""
@@ -117,20 +163,21 @@ class AIReader:
     def _start_instant_ai(self):
         """啟動 InstantAI 輪詢執行緒"""
         try:
-            from Automation.BDaq import ValueRange
             from Automation.BDaq.BDaqApi import BioFailed
 
             ai = self._daq.get_instant_ai_ctrl()
             if ai is None:
                 raise RuntimeError("InstantAiCtrl 未初始化")
 
-            # ── 設定各通道量程 ────────────────────────────────────────────────
-            # Hall ch0~2：0~5V 單極性（Hall 3.3V 訊號）
-            for i in range(3):
-                ai.channels[i].valueRange = ValueRange.V_0To5
-            # Encoder ch3~4：0~10V 單極性（Encoder 5V 訊號）
-            for i in range(3, 5):
-                ai.channels[i].valueRange = ValueRange.V_0To10
+            # ── 設定各通道量程（依 CHANNEL_CONFIG）────────────────────────────
+            # Hall 通道：hall 量程（預設 0~5V，Hall 3.3V 訊號）
+            hall_vr = CHANNEL_CONFIG.value_range("hall")
+            for ch in self._hall_chs:
+                ai.channels[ch].valueRange = hall_vr
+            # Encoder 通道：encoder 量程（預設 0~10V，Encoder 5V 訊號）
+            enc_vr = CHANNEL_CONFIG.value_range("encoder")
+            for ch in self._encoder_chs:
+                ai.channels[ch].valueRange = enc_vr
 
             # ── 啟動輪詢執行緒 ────────────────────────────────────────────────
             self._thread = threading.Thread(
@@ -140,7 +187,8 @@ class AIReader:
 
             print(
                 f"[AIReader] InstantAI 輪詢已啟動 | "
-                f"通道數: {_CH_COUNT} | "
+                f"通道: {self._all_chs} | "
+                f"讀取範圍: start={self._read_start}, count={self._read_count} | "
                 f"輪詢間隔: 10ms (100 Hz)"
             )
 
@@ -151,7 +199,7 @@ class AIReader:
     def _instant_ai_loop(self):
         """
         InstantAI 輪詢執行緒
-        每 10ms 讀取一次 5 通道電壓，存入 deque 並觸發 callback
+        每 10ms 讀取一次涵蓋範圍通道電壓，取出所需通道存入 deque 並觸發 callback
         """
         from Automation.BDaq.BDaqApi import BioFailed
 
@@ -161,7 +209,7 @@ class AIReader:
         while self._running:
             t_start = time.time()
             try:
-                ret, data = ai.readDataF64(0, _CH_COUNT)
+                ret, data = ai.readDataF64(self._read_start, self._read_count)
 
                 if BioFailed(ret) or not data:
                     time.sleep(interval)
@@ -170,13 +218,15 @@ class AIReader:
                 t_now = time.time()
                 with self._lock:
                     self._timestamps.append(t_now)
-                    for col, ch in enumerate(_ALL_CHS):
+                    for ch in self._all_chs:
+                        # data 索引 = 實際通道 - 讀取起始通道
+                        col = ch - self._read_start
                         val = float(data[col])
                         self._buffers[ch].append(val)
                         self._latest[ch] = val
 
                 if self._on_data_callback:
-                    latest_snapshot = {ch: self._latest[ch] for ch in _ALL_CHS}
+                    latest_snapshot = {ch: self._latest[ch] for ch in self._all_chs}
                     self._on_data_callback(latest_snapshot)
 
             except Exception as e:
@@ -203,7 +253,7 @@ class AIReader:
         while self._running:
             try:
                 t = time.time()
-                readings = {ch: self._simulate_ai(ch, t) for ch in _ALL_CHS}
+                readings = {ch: self._simulate_ai(ch, t) for ch in self._all_chs}
 
                 with self._lock:
                     self._timestamps.append(t)
@@ -220,16 +270,21 @@ class AIReader:
             time.sleep(interval)
 
     def _simulate_ai(self, channel: int, t: float) -> float:
-        """模擬 AI 電壓讀取（用於無硬體時測試）"""
-        # Hall (ch0~2): 3.3V 方波模擬，三相相差 120 度
-        if channel < 3:
-            return 3.3 if math.sin(2 * math.pi * 2 * t + channel * 2.094) > 0 else 0.0
-        # Encoder A (ch3): 5V 方波模擬
-        elif channel == 3:
-            return 5.0 if math.sin(2 * math.pi * 10 * t) > 0 else 0.0
-        # Encoder B (ch4): 5V 方波模擬，A/B 相差 90 度
-        elif channel == 4:
-            return 5.0 if math.sin(2 * math.pi * 10 * t - math.pi / 2) > 0 else 0.0
+        """
+        模擬 AI 電壓讀取（用於無硬體時測試）
+
+        依通道所屬類型（Hall / Encoder）產生對應模擬波形，
+        不再依賴固定通道編號，支援使用者自訂通道。
+        """
+        # Hall 通道：3.3V 方波，三相相差 120 度
+        if channel in self._hall_chs:
+            phase_idx = self._hall_chs.index(channel)
+            return 3.3 if math.sin(2 * math.pi * 2 * t + phase_idx * 2.094) > 0 else 0.0
+        # Encoder 通道：5V 方波，A/B 相差 90 度
+        elif channel in self._encoder_chs:
+            enc_idx = self._encoder_chs.index(channel)
+            phase = 0.0 if enc_idx == 0 else -math.pi / 2
+            return 5.0 if math.sin(2 * math.pi * 10 * t + phase) > 0 else 0.0
         return 0.0
 
     # ─── 資料查詢方法 ────────────────────────────────────────────────────────────
@@ -260,9 +315,11 @@ class AIReader:
         Args:
             channel: AI 通道編號
         Returns:
-            np.ndarray: 電壓值陣列
+            np.ndarray: 電壓值陣列（通道不存在時回傳空陣列）
         """
         with self._lock:
+            if channel not in self._buffers:
+                return np.array([])
             return np.array(list(self._buffers[channel]))
 
     def get_timestamps(self) -> np.ndarray:
@@ -278,9 +335,9 @@ class AIReader:
         """
         with self._lock:
             return {
-                "U": self._latest[HALL_THRESHOLDS["channels"]["U"]],
-                "V": self._latest[HALL_THRESHOLDS["channels"]["V"]],
-                "W": self._latest[HALL_THRESHOLDS["channels"]["W"]],
+                "U": self._latest.get(CHANNEL_CONFIG.hall_ai("U"), 0.0),
+                "V": self._latest.get(CHANNEL_CONFIG.hall_ai("V"), 0.0),
+                "W": self._latest.get(CHANNEL_CONFIG.hall_ai("W"), 0.0),
             }
 
     def get_encoder_voltages(self) -> dict:
@@ -291,8 +348,8 @@ class AIReader:
         """
         with self._lock:
             return {
-                "A": self._latest[ENCODER_THRESHOLDS["channels"]["A"]],
-                "B": self._latest[ENCODER_THRESHOLDS["channels"]["B"]],
+                "A": self._latest.get(CHANNEL_CONFIG.encoder_ai("A"), 0.0),
+                "B": self._latest.get(CHANNEL_CONFIG.encoder_ai("B"), 0.0),
             }
 
     def read_snapshot(self, num_samples: int = 100) -> dict:
@@ -306,7 +363,7 @@ class AIReader:
         """
         with self._lock:
             result = {}
-            for ch in _ALL_CHS:
+            for ch in self._all_chs:
                 buf = list(self._buffers[ch])
                 result[ch] = buf[-num_samples:] if len(buf) >= num_samples else buf
             return result

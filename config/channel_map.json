@@ -1,0 +1,20 @@
+{
+  "hall": {
+    "U": { "ai": 0, "di": 0 },
+    "V": { "ai": 1, "di": 1 },
+    "W": { "ai": 2, "di": 2 }
+  },
+  "encoder": {
+    "A": { "ai": 3, "di": 3 },
+    "B": { "ai": 4, "di": 4 }
+  },
+  "value_range": {
+    "hall": "V_0To5",
+    "encoder": "V_0To10"
+  },
+  "y_range": {
+    "hall": [-0.2, 3.8],
+    "encoder": [-0.5, 6.0]
+  },
+  "di_port": 0
+}

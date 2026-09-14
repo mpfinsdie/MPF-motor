@@ -384,21 +384,27 @@ class DAQController:
     # ─── 模擬模式輔助方法 ───────────────────────────────────────────────────────
 
     def _simulate_di(self) -> int:
-        """模擬 DI 數位讀取（用於無硬體時測試）"""
+        """
+        模擬 DI 數位讀取（用於無硬體時測試）
+
+        依 CHANNEL_CONFIG 目前的 DI 通道對應設定各 bit，支援使用者自訂通道。
+        """
         import math
         import time
+        from config.channel_config import CHANNEL_CONFIG
+
         t = time.time()
         result = 0
-        # Hall U/V/W (bit0~2): 模擬三相 Hall 訊號
-        for i in range(3):
+        # Hall U/V/W：模擬三相 Hall 訊號，三相相差 120 度
+        for i, sig in enumerate(("U", "V", "W")):
             if math.sin(2 * math.pi * 2 * t + i * 2.094) > 0:
-                result |= (1 << i)
-        # Encoder A (bit3): 模擬正交訊號
+                result |= (1 << CHANNEL_CONFIG.hall_di(sig))
+        # Encoder A：模擬正交訊號
         if math.sin(2 * math.pi * 10 * t) > 0:
-            result |= (1 << 3)
-        # Encoder B (bit4): 相差 90 度
+            result |= (1 << CHANNEL_CONFIG.encoder_di("A"))
+        # Encoder B：與 A 相差 90 度
         if math.sin(2 * math.pi * 10 * t - math.pi / 2) > 0:
-            result |= (1 << 4)
+            result |= (1 << CHANNEL_CONFIG.encoder_di("B"))
         return result
 
     def __enter__(self):

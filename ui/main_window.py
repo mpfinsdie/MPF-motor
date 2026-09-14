@@ -31,7 +31,11 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
-from config.thresholds import SAMPLING, HALL_THRESHOLDS, ENCODER_THRESHOLDS, DATABASE, DIAGNOSTIC
+from config.thresholds import (
+    SAMPLING, HALL_THRESHOLDS, ENCODER_THRESHOLDS, DATABASE, DIAGNOSTIC,
+    refresh_channel_map,
+)
+from config.channel_config import CHANNEL_CONFIG
 from daq.daq_controller import DAQController
 from daq.ai_reader import AIReader
 from daq.di_reader import DIReader
@@ -43,6 +47,7 @@ from ui.waveform_widget import WaveformWidget
 from ui.diagnostic_widget import DiagnosticWidget
 from ui.result_panel import ResultPanel
 from ui.session_dialog import SessionStartDialog
+from ui.channel_config_dialog import ChannelConfigDialog
 from ui.history_viewer import HistoryViewer
 from report.report_generator import ReportGenerator
 from db.database import DatabaseManager
@@ -273,6 +278,15 @@ class MainWindow(QMainWindow):
         self._btn_start.setToolTip("設定量測參數（PPR、Hall/Encoder 閾值）及馬達序號/操作員")
         self._btn_start.clicked.connect(self._on_open_param_settings)
         layout.addWidget(self._btn_start)
+
+        # 硬體通道設定（連線後可用，調整 AI/DI 通道對應）
+        self._btn_channel = QPushButton("🔌 硬體通道")
+        self._btn_channel.setToolTip(
+            "設定各訊號（Hall U/V/W、Encoder A/B）對應的硬體 AI / DI 通道，\n"
+            "可依實際接線自由調整，不必固定 AI0~4 / DI0~4"
+        )
+        self._btn_channel.clicked.connect(self._on_open_channel_settings)
+        layout.addWidget(self._btn_channel)
 
         # 高取樣診斷（連線後可用，不需監控開啟）
         self._btn_diag = QPushButton("🔬 高取樣診斷")
@@ -900,6 +914,64 @@ class MainWindow(QMainWindow):
             f"[MainWindow] 參數設置已套用 | {serial_display} | "
             f"Hall {hall_ppr}週期/轉 | Enc PPR={enc_ppr}({info['resolution_bits']}bits) | "
             f"理論比值={theory_ratio:.3f} ±{info['ratio_tolerance']*100:.0f}%"
+        )
+
+    def _on_open_channel_settings(self):
+        """
+        操作員按「硬體通道」：開啟對話框調整 AI/DI 通道對應並即時套用
+
+        流程：
+          1. 診斷中禁止調整（避免影響進行中的採樣）
+          2. 開啟 ChannelConfigDialog 讓使用者設定
+          3. 存回 channel_map.json → refresh_channel_map() 更新 thresholds
+          4. 重建 AI/DI 讀取器通道結構（若監控中會自動重啟套用）
+        """
+        if self._is_diagnosing:
+            QMessageBox.warning(self, "警告", "診斷進行中，無法變更硬體通道設定")
+            return
+
+        dlg = ChannelConfigDialog(parent=self)
+        if dlg.exec_() != ChannelConfigDialog.Accepted:
+            return
+
+        new_map = dlg.get_channel_map()
+
+        # ── 1. 存檔並更新中央設定 ─────────────────────────────────────────────
+        CHANNEL_CONFIG.set_map(new_map, save=True)
+
+        # ── 2. 更新 thresholds 內的通道字典（就地更新，維持既有參照）─────────
+        refresh_channel_map()
+
+        # ── 3. 重建讀取器通道結構（refresh 會自動處理啟停）──────────────────
+        try:
+            self._ai_reader.refresh_channels()
+            self._di_reader.refresh_channels()
+        except Exception as e:
+            print(f"[MainWindow] 套用通道設定時發生錯誤: {e}")
+            QMessageBox.warning(self, "警告", f"套用通道設定時發生錯誤：\n{e}")
+            return
+
+        # ── 4. 更新狀態列顯示 ─────────────────────────────────────────────────
+        hall_ai = CHANNEL_CONFIG.hall_ai_channels()
+        enc_ai  = CHANNEL_CONFIG.encoder_ai_channels()
+        hall_di = CHANNEL_CONFIG.hall_di_channels()
+        enc_di  = CHANNEL_CONFIG.encoder_di_channels()
+        self._status_bar.showMessage(
+            f"硬體通道已更新 | "
+            f"Hall AI={list(hall_ai.values())} DI={list(hall_di.values())} | "
+            f"Enc AI={list(enc_ai.values())} DI={list(enc_di.values())}"
+        )
+        QMessageBox.information(
+            self, "成功",
+            "硬體通道設定已套用並儲存至 channel_map.json。\n\n"
+            f"Hall  AI: U={hall_ai['U']} V={hall_ai['V']} W={hall_ai['W']}  "
+            f"DI: U={hall_di['U']} V={hall_di['V']} W={hall_di['W']}\n"
+            f"Encoder AI: A={enc_ai['A']} B={enc_ai['B']}  "
+            f"DI: A={enc_di['A']} B={enc_di['B']}"
+        )
+        print(
+            f"[MainWindow] 硬體通道已更新 | "
+            f"Hall AI={hall_ai} DI={hall_di} | Enc AI={enc_ai} DI={enc_di}"
         )
 
     def _on_reset_encoder(self):
