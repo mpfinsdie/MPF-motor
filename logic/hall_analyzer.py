@@ -3,11 +3,91 @@ Hall Sensor 分析模組
 驗證三相 Hall Sensor 的電壓準位與 H/L 狀態一致性
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 from config.thresholds import HALL_THRESHOLDS
+
+
+# ─── Hall 相序判斷 ───────────────────────────────────────────────────────────
+# UVW → 二進制整數：state = U×2^0 + V×2^1 + W×2^2
+#   （U=bit0, V=bit1, W=bit2）
+#
+# CW  相序：5 → 1 → 3 → 2 → 6 → 4 →(回)→ 5
+# CCW 相序：4 → 6 → 2 → 3 → 1 → 5 →(回)→ 4
+CW_TRANSITIONS = {5: 1, 1: 3, 3: 2, 2: 6, 6: 4, 4: 5}
+CCW_TRANSITIONS = {4: 6, 6: 2, 2: 3, 3: 1, 1: 5, 5: 4}
+
+
+class HallSequenceDetector:
+    """
+    即時 Hall 相序偵測器（CW / CCW / Error）
+
+    依序記錄三相 Hall DI 狀態變化，將 UVW 編碼為二進制整數，
+    比對相鄰狀態跳轉是否符合 CW 或 CCW 合法轉換表：
+      - 全部符合 CW  → 回傳 "CW"
+      - 全部符合 CCW → 回傳 "CCW"
+      - 出現不合法或混合方向 → 回傳 "Error"
+      - 有效跳轉不足（< 2 次狀態變化）→ 回傳 "---"
+
+    無效狀態（0=000 或 7=111，三相全同）會被忽略。
+    """
+
+    WINDOW = 6  # 保留最近 6 個不同狀態（一個完整電氣週期）
+
+    def __init__(self):
+        self._history: deque = deque(maxlen=self.WINDOW)
+        self._last_state: int = -1
+
+    @staticmethod
+    def encode(u: bool, v: bool, w: bool) -> int:
+        """UVW → 二進制整數（U=bit0, V=bit1, W=bit2）"""
+        return int(u) | (int(v) << 1) | (int(w) << 2)
+
+    def update(self, u: bool, v: bool, w: bool) -> str:
+        """
+        以最新三相 Hall DI 狀態更新偵測器並回傳目前相序判斷結果
+
+        Args:
+            u, v, w: 三相 Hall DI 狀態（True=H, False=L）
+        Returns:
+            str: "CW" / "CCW" / "Error" / "---"
+        """
+        state = self.encode(u, v, w)
+
+        # 忽略無效狀態（三相全 0 或全 1）與未變化狀態
+        if state in (0, 7):
+            return self._evaluate()
+        if state == self._last_state:
+            return self._evaluate()
+
+        self._history.append(state)
+        self._last_state = state
+        return self._evaluate()
+
+    def _evaluate(self) -> str:
+        """依目前狀態歷史比對 CW / CCW / Error"""
+        if len(self._history) < 2:
+            return "---"
+
+        states = list(self._history)
+        transitions = list(zip(states, states[1:]))
+
+        all_cw = all(CW_TRANSITIONS.get(a) == b for a, b in transitions)
+        all_ccw = all(CCW_TRANSITIONS.get(a) == b for a, b in transitions)
+
+        if all_cw:
+            return "CW"
+        if all_ccw:
+            return "CCW"
+        return "Error"
+
+    def reset(self):
+        """清除偵測歷史"""
+        self._history.clear()
+        self._last_state = -1
 
 
 class VoltageLevel(Enum):

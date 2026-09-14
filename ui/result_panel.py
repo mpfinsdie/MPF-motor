@@ -112,20 +112,45 @@ class HallLivePanel(QGroupBox):
             self._di_labels[phase] = make_status_label()
             grid.addWidget(self._di_labels[phase], row, 3)
 
+        # ── 相序判斷（獨立顯示於面板底部）──────────────────────────────────
+        seq_row = len(self.PHASES) + 2
+        seq_sep = QFrame()
+        seq_sep.setFrameShape(QFrame.HLine)
+        seq_sep.setStyleSheet("color: #444444;")
+        grid.addWidget(seq_sep, seq_row, 0, 1, 4)
+
+        seq_title = make_label("相序判斷 (UVW)")
+        seq_title.setStyleSheet("color: #888888; font-size: 10px;")
+        grid.addWidget(seq_title, seq_row + 1, 0, 1, 2)
+
+        self._seq_label = QLabel("---")
+        self._seq_label.setAlignment(Qt.AlignCenter)
+        self._seq_label.setStyleSheet(STYLE_UNKNOWN)
+        self._seq_label.setMinimumWidth(80)
+        seq_font = QFont("Arial", 13, QFont.Bold)
+        self._seq_label.setFont(seq_font)
+        grid.addWidget(self._seq_label, seq_row + 1, 2, 1, 2)
+
         # 閾值提示
         thresh_lbl = make_label(
             f"閾值：VH ≥ {self._vh_min}V  VL ≤ {self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
         )
         thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
-        grid.addWidget(thresh_lbl, len(self.PHASES) + 2, 0, 1, 4)
+        grid.addWidget(thresh_lbl, seq_row + 2, 0, 1, 4)
 
-    def update_voltages(self, hall_voltages: dict, di_states: dict = None):
+    def update_voltages(
+        self,
+        hall_voltages: dict,
+        di_states: dict = None,
+        seq_result: str = "---"
+    ):
         """
         更新即時電壓顯示
 
         Args:
             hall_voltages: {"U": v, "V": v, "W": v}
             di_states:     {"U": bool, "V": bool, "W": bool}（可選）
+            seq_result:    相序判斷結果 "CW" / "CCW" / "Error" / "---"
         """
         for phase in self.PHASES:
             v = hall_voltages.get(phase, 0.0)
@@ -150,6 +175,20 @@ class HallLivePanel(QGroupBox):
             else:
                 self._di_labels[phase].setText("---")
                 self._di_labels[phase].setStyleSheet(STYLE_UNKNOWN)
+
+        # ── 相序判斷結果顯示 ──────────────────────────────────────────────
+        if seq_result == "CW":
+            self._seq_label.setText("✓ CW")
+            self._seq_label.setStyleSheet(STYLE_PASS)
+        elif seq_result == "CCW":
+            self._seq_label.setText("✓ CCW")
+            self._seq_label.setStyleSheet(STYLE_HIGH)
+        elif seq_result == "Error":
+            self._seq_label.setText("✗ Error")
+            self._seq_label.setStyleSheet(STYLE_FAIL)
+        else:
+            self._seq_label.setText("---")
+            self._seq_label.setStyleSheet(STYLE_UNKNOWN)
 
 
 class EncoderLivePanel(QGroupBox):
@@ -314,7 +353,8 @@ class ResultPanel(QWidget):
         hall_voltages: dict,
         enc_voltages: dict,
         enc_state: dict = None,
-        di_states: dict = None
+        di_states: dict = None,
+        hall_seq: str = "---"
     ):
         """
         更新即時電壓顯示（由 _update_analysis 每 50ms 呼叫）
@@ -324,6 +364,7 @@ class ResultPanel(QWidget):
             enc_voltages:  {"A": v, "B": v}
             enc_state:     {"A": bool, "B": bool, "count": int, "rpm": float, "position_deg": float}
             di_states:     {"U": bool, "V": bool, "W": bool}（Hall DI 狀態，可選）
+            hall_seq:      Hall 相序判斷結果 "CW" / "CCW" / "Error" / "---"
         """
-        self._hall_panel.update_voltages(hall_voltages, di_states)
+        self._hall_panel.update_voltages(hall_voltages, di_states, seq_result=hall_seq)
         self._enc_panel.update_voltages(enc_voltages, enc_state)

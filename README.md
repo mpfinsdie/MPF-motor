@@ -35,6 +35,7 @@
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形（AI 電壓，含閾值線）
 - **即時觀察面板（10 kHz 監控）**：顯示各通道即時電壓與 H/L/X 準位（不做 PASS/FAIL 判斷）
+- **🆕 Hall 相序即時判斷（v1.9 新增）**：即時觀察面板底部顯示 Hall 相序方向（✓ CW / ✓ CCW / ✗ Error），依 UVW 二進制狀態跳轉判斷旋轉方向與訊號正確性
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
 - 視窗高度固定 600px，波形圖滾輪縮放僅作用於 X 軸（時間軸）
@@ -334,7 +335,7 @@ MPF-motor/
 │
 ├── logic/
 │   ├── __init__.py
-│   ├── hall_analyzer.py           # Hall Sensor 分析邏輯（保留供參考）
+│   ├── hall_analyzer.py           # Hall Sensor 分析邏輯 + HallSequenceDetector 相序判斷（v1.9）
 │   ├── encoder_analyzer.py        # Encoder 分析邏輯（保留供參考）
 │   ├── diag_analyzer.py           # 高速波形診斷分析器（v1.6 新增）
 │   ├── test_session.py            # 測試場次管理 + 統計計算（v1.1 新增）
@@ -629,6 +630,71 @@ daq/daq_controller.py   → 模擬 DI 依動態通道產生位元
 
 ---
 
+## Hall 相序即時判斷（v1.9 新增）
+
+### 設計原理
+
+三相 Hall Sensor（U/V/W）在馬達旋轉時會依固定順序切換 H/L 狀態，將 UVW 三個數位狀態編碼為二進制整數即可判斷旋轉方向：
+
+```
+狀態編碼 = U×2^0 + V×2^1 + W×2^2
+（U = bit0，V = bit1，W = bit2）
+```
+
+正常旋轉時，狀態值會依固定序列循環（不會出現 0=000 或 7=111 的全同狀態）：
+
+| 方向 | 狀態循環序列 |
+|------|--------------|
+| **CW（順時針）** | 5 → 1 → 3 → 2 → 6 → 4 →（回）→ 5 |
+| **CCW（逆時針）** | 4 → 6 → 2 → 3 → 1 → 5 →（回）→ 4 |
+
+### 狀態對照表
+
+| 狀態值 | 二進制 (WVU) | W | V | U |
+|:---:|:---:|:---:|:---:|:---:|
+| 5 | 101 | 1 | 0 | 1 |
+| 1 | 001 | 0 | 0 | 1 |
+| 3 | 011 | 0 | 1 | 1 |
+| 2 | 010 | 0 | 1 | 0 |
+| 6 | 110 | 1 | 1 | 0 |
+| 4 | 100 | 1 | 0 | 0 |
+
+### 判斷邏輯（`HallSequenceDetector`）
+
+`logic/hall_analyzer.py` 新增 `HallSequenceDetector` 類別，於即時監控每次更新時記錄狀態變化：
+
+1. 將最新 UVW 編碼為狀態值，**忽略無效狀態**（0=000、7=111）與**未變化狀態**
+2. 以 deque 保留最近 **6 個不同狀態**（一個完整電氣週期）
+3. 比對相鄰狀態跳轉是否全部符合 CW 或 CCW 合法轉換表：
+
+| 判斷結果 | 顯示 | 條件 |
+|----------|------|------|
+| **CW** | ✓ CW（綠色）| 所有相鄰跳轉皆符合 CW 轉換表 |
+| **CCW** | ✓ CCW（藍色）| 所有相鄰跳轉皆符合 CCW 轉換表 |
+| **Error** | ✗ Error（紅色）| 出現不合法跳轉或方向混合（如接線錯誤、掉脈波、相序反接） |
+| **---** | ---（灰色）| 有效狀態變化不足（< 2 次跳轉，無法判斷） |
+
+### 顯示位置
+
+相序判斷結果顯示於**即時觀察面板 Hall 區塊底部**（獨立於電壓/準位表格），以大字標籤即時更新。此判斷僅供監控觀察，不影響高取樣診斷的 PASS/FAIL。
+
+### 資料流
+
+```
+DIReader.get_hall_states() → {"U": bool, "V": bool, "W": bool}
+  ↓
+HallSequenceDetector.update(u, v, w)
+  │  編碼 state → 記錄狀態變化 → 比對 CW/CCW 轉換表
+  ↓ 回傳 "CW" / "CCW" / "Error" / "---"
+MainWindow._update_analysis()
+  ↓
+ResultPanel.update_live_voltages(hall_seq=...)
+  ↓
+HallLivePanel 底部相序標籤（即時更新）
+```
+
+---
+
 ## AI 取樣架構
 
 ### 即時監控模式（InstantAiCtrl 輪詢，10 kHz 標示）
@@ -814,3 +880,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.6.0** | **2026-08-27** | **監控預設關閉 + 高速波形診斷分析**：新增「📡 監控開關」toggle 按鈕（連線後預設關閉）；監控模式改為純即時觀察（10 kHz 標示，移除 PASS/FAIL 即時判斷）；新增 `DiagAnalyzer` 對高速波形做 H/L 比例、不定態比例、邊緣計數、頻率估算，診斷完成後輸出各通道與整體 PASS/FAIL；DB 新增 `diag_pass`、`diag_ch_results` 欄位；歷史查詢視窗顯示診斷 PASS/FAIL 與各通道摘要 |
 | **1.7.0** | **2026-09-02** | **Hall/Encoder 脈波比值交叉驗證 + 馬達規格可設定**：新增 `RatioCheckResult` 資料類別與 `DiagAnalyzer._cross_validate_ratio()` 方法，對每相 Hall（U/V/W）單獨與 Encoder 平均頻率做比值檢查（理論比值 = PPR / Hall週期/轉 = 512/90 ≈ 5.689），可偵測單相掉脈波、Encoder 掉脈波、無訊號等異常；`HALL_THRESHOLDS` 新增 `hall_pulses_per_rev=90`；`ENCODER_THRESHOLDS` 新增 `resolution_bits=11`、`ppr` 改為 512；`DIAGNOSTIC.analysis` 新增 `enable_ratio_check=True`、`ratio_tolerance=0.15`；`SessionStartDialog` 新增 Hall 週期/轉、Encoder 解析度 bits、比值容差三個設定欄位（bits 變更自動帶出 PPR 建議值，即時顯示理論比值與允許範圍）；npz metadata 新增四個馬達規格欄位供回放分析還原；模擬模式頻率改為動態計算確保比值正確 |
 | **1.8.0** | **2026-09-14** | **硬體通道彈性設定**：Hall U/V/W 與 Encoder A/B 對應的 AI/DI 通道不再寫死，可由使用者自訂；新增 `config/channel_map.json` 設定檔與 `config/channel_config.py`（`CHANNEL_CONFIG` 單例，含 `DEFAULT_CHANNEL_MAP`、`load/save`、`_merge_defaults`、`value_range(kind)`、`diagnostic_channels()` 等查詢方法）；`config/thresholds.py` 改為動態帶入通道並新增 `refresh_channel_map()`；`ai_reader.py`/`di_reader.py` 重構為動態通道並新增 `refresh_channels()` 熱重載（AI 以 min~max 範圍讀取支援非連續通道）；`diagnostic_scanner.py` 改依 `kind`（hall/encoder）判斷量程與模擬相位並向後相容舊通道定義；`daq_controller._simulate_di()` 依動態通道產生位元；新增 `ui/channel_config_dialog.py` 對話框（AI/DI 通道、AI 量程、DI 埠號設定，含重複通道檢查與恢復預設）；主視窗新增「🔌 硬體通道」按鈕，套用後即時 `set_map`/`refresh_channel_map`/`refresh_channels` 熱套用 |
+| **1.9.0** | **2026-09-14** | **Hall 相序即時判斷**：`logic/hall_analyzer.py` 新增 `HallSequenceDetector` 類別，將三相 Hall（U/V/W）狀態編碼為二進制整數（U=bit0、V=bit1、W=bit2），依相鄰狀態跳轉比對 CW（5→1→3→2→6→4）/ CCW（4→6→2→3→1→5）合法轉換表，判斷旋轉方向與訊號正確性；保留最近 6 個不同狀態（一電氣週期），忽略無效狀態（0/7）與未變化狀態，輸出 CW / CCW / Error / ---；`ui/result_panel.py` 的 `HallLivePanel` 底部新增獨立相序標籤（✓ CW 綠 / ✓ CCW 藍 / ✗ Error 紅 / --- 灰），`update_voltages()`、`update_live_voltages()` 新增相序參數；`ui/main_window.py` 於 `_update_analysis()` 補上 `get_hall_states()` 讀取（同時修正 Hall DI 狀態顯示）並整合相序偵測 |

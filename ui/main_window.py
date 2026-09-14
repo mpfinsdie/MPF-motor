@@ -39,7 +39,7 @@ from config.channel_config import CHANNEL_CONFIG
 from daq.daq_controller import DAQController
 from daq.ai_reader import AIReader
 from daq.di_reader import DIReader
-from logic.hall_analyzer import HallAnalyzer
+from logic.hall_analyzer import HallAnalyzer, HallSequenceDetector
 from logic.encoder_analyzer import EncoderAnalyzer
 from logic.diagnostic_scanner import DiagnosticScanner
 from logic.diag_analyzer import DiagAnalyzer
@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
         self._ai_reader    = AIReader(self._daq)
         self._di_reader    = DIReader(self._daq)
         self._hall_analyzer = HallAnalyzer()
+        self._hall_seq_detector = HallSequenceDetector()
         self._enc_analyzer  = EncoderAnalyzer()
         self._report_gen    = ReportGenerator()
 
@@ -1070,12 +1071,22 @@ class MainWindow(QMainWindow):
         hall_voltages = self._ai_reader.get_hall_voltages()
         enc_voltages  = self._ai_reader.get_encoder_voltages()
         enc_state     = self._di_reader.get_encoder_state()
+        hall_di       = self._di_reader.get_hall_states()
+
+        # ── Hall 相序判斷（CW / CCW / Error）─────────────────────────────
+        hall_seq = self._hall_seq_detector.update(
+            hall_di.get("U", False),
+            hall_di.get("V", False),
+            hall_di.get("W", False),
+        )
 
         # 更新 ResultPanel 即時電壓顯示（不傳入 PASS/FAIL 結果）
         self._result_panel.update_live_voltages(
             hall_voltages=hall_voltages,
             enc_voltages=enc_voltages,
             enc_state=enc_state,
+            di_states=hall_di,
+            hall_seq=hall_seq,
         )
 
     # ─── 視窗關閉 ──────────────────────────────────────────────────────────────
