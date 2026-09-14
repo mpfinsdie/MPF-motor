@@ -22,6 +22,14 @@
 - 旋轉方向判斷（正轉/反轉/靜止）
 - 角度位置計算（度）
 
+### 🔌 硬體通道彈性設定（v1.8 新增）
+- **不再寫死 AI0~4 / DI0~4**：Hall U/V/W 與 Encoder A/B 對應的 AI、DI 通道可由使用者自行調整
+- **UI 對話框設定**：主畫面新增「🔌 硬體通道」按鈕，開啟對話框即可設定每個訊號的 AI/DI 通道、AI 量程、DI 埠號
+- **即時套用**：設定後立即熱重載（`refresh_channels()`），無需重啟程式
+- **JSON 設定檔持久化**：設定存於 `config/channel_map.json`，下次啟動自動載入；缺漏欄位自動以預設值補齊
+- **重複通道檢查**：套用前驗證 AI、DI 通道不重複，避免衝突
+- **非連續通道支援**：可設定任意通道（如 AI 5/6/7/8/9），InstantAI 以 min~max 範圍讀取後依欄位索引取出
+
 ### GUI 介面
 - PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
 - Hall U/V/W 電壓波形（含閾值線）
@@ -88,6 +96,8 @@
 | GND | AGND | DGND | 共地 | — |
 
 > ⚠️ **注意**：USB-4716 DI 為 TTL 相容（VIH max = 5.5V），5V 訊號可直接接入。
+>
+> 🔌 **v1.8 起通道可調整**：上表為**預設**通道對應，實際使用的 AI/DI 通道、AI 量程、DI 埠號可在程式內「🔌 硬體通道」對話框自由設定，並存於 `config/channel_map.json`。詳見下方[硬體通道彈性設定](#硬體通道彈性設定v18-新增)章節。
 
 ---
 
@@ -214,6 +224,7 @@ python main.py
 | **↺ 重置計數** | 重置 Encoder 計數器 |
 | **💾 匯出報表** | 匯出最近一次場次的原始數據（Excel/CSV） |
 | **📋 歷史記錄** | 開啟歷史查詢視窗，查看所有場次統計（含診斷 PASS/FAIL） |
+| **🔌 硬體通道** | 開啟硬體通道設定對話框，調整 Hall/Encoder 的 AI/DI 通道、AI 量程、DI 埠號，設定後即時套用（診斷中禁用） |
 | **🗄 DB 路徑** | 變更 SQLite 資料庫儲存路徑 |
 | **🔌 重新連線** | 重新連線 USB-4716 |
 
@@ -307,7 +318,9 @@ MPF-motor/
 │
 ├── config/
 │   ├── __init__.py
-│   └── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑、診斷設定
+│   ├── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑、診斷設定（動態套用通道對應）
+│   ├── channel_config.py          # 硬體通道對應中央設定（JSON 載入/儲存 + ValueRange 轉換）（v1.8 新增）
+│   └── channel_map.json           # 使用者通道對應設定檔（自動建立/持久化）（v1.8 新增）
 │
 ├── daq/
 │   ├── __init__.py
@@ -335,6 +348,7 @@ MPF-motor/
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
 │   ├── result_panel.py            # 即時觀察面板（10 kHz 監控，僅顯示電壓/準位，無 PASS/FAIL）
 │   ├── session_dialog.py          # 場次啟動對話框（v1.1 新增）
+│   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
 │   └── history_viewer.py          # 歷史查詢視窗（含診斷場次識別）
 │
 └── report/
@@ -534,6 +548,87 @@ enc_base_freq  = enc_ppr × sim_rps              # 例：512 Hz
 
 ---
 
+## 硬體通道彈性設定（v1.8 新增）
+
+### 設計動機
+
+早期版本將 Hall（U/V/W）與 Encoder（A/B）對應的 AI/DI 通道寫死於 `ai_reader.py`、`di_reader.py`、`thresholds.py`、`diagnostic_scanner.py` 等多個檔案中（固定 AI0~4、DI0~4）。不同硬體佈線或需避開故障通道時，必須修改多處程式碼。v1.8 將通道對應集中管理，並提供 UI 對話框即時調整。
+
+### 架構
+
+```
+config/channel_map.json（使用者設定檔，持久化）
+  ↓ 載入 / 儲存
+config/channel_config.py：CHANNEL_CONFIG 單例
+  │  DEFAULT_CHANNEL_MAP 預設值 + _merge_defaults() 補齊缺漏欄位
+  │  查詢方法：hall_ai/hall_di/encoder_ai/encoder_di、value_range(kind)、y_range(kind)、di_port() …
+  ↓ 供各模組查詢
+config/thresholds.py    → HALL/ENCODER_THRESHOLDS、AI_RANGE、DIAGNOSTIC["channels"] 動態帶入
+daq/ai_reader.py        → 動態 AI 通道 + refresh_channels()（min~max 範圍讀取，欄位索引取值）
+daq/di_reader.py        → 動態 DI 通道 + refresh_channels()
+logic/diagnostic_scanner.py → 依 kind（hall/encoder）決定 value_range 與模擬相位
+daq/daq_controller.py   → 模擬 DI 依動態通道產生位元
+```
+
+### 設定檔格式（`config/channel_map.json`）
+
+```json
+{
+  "hall": {
+    "U": { "ai": 0, "di": 0 },
+    "V": { "ai": 1, "di": 1 },
+    "W": { "ai": 2, "di": 2 }
+  },
+  "encoder": {
+    "A": { "ai": 3, "di": 3 },
+    "B": { "ai": 4, "di": 4 }
+  },
+  "value_range": { "hall": "V_0To5", "encoder": "V_0To10" },
+  "y_range": { "hall": [-0.2, 3.8], "encoder": [-0.5, 6.0] },
+  "di_port": 0
+}
+```
+
+| 欄位 | 說明 |
+|------|------|
+| `hall.U/V/W.ai` `hall.U/V/W.di` | 三相 Hall 各自的 AI、DI 通道號 |
+| `encoder.A/B.ai` `encoder.A/B.di` | Encoder A/B 相各自的 AI、DI 通道號 |
+| `value_range.hall` `value_range.encoder` | AI 量程（DAQNavi `ValueRange` 名稱，如 `V_0To5`、`V_0To10`） |
+| `y_range.hall` `y_range.encoder` | 波形圖 Y 軸顯示範圍 `[min, max]` |
+| `di_port` | DI 讀取的埠號 |
+
+### 「🔌 硬體通道」對話框
+
+1. 點擊主畫面「🔌 硬體通道」按鈕開啟對話框（**診斷進行中禁止開啟**）
+2. 為 Hall U/V/W 與 Encoder A/B 分別設定 **AI 通道**（0~15）與 **DI 通道**（0~7）
+3. 選擇 Hall / Encoder 的 **AI 量程**（`V_0To5`、`V_0To10`、`V_Neg5To5`、`V_Neg10To10`、`V_0To2point5`、`V_Neg2point5To2point5`）
+4. 設定 **DI 埠號**
+5. 按鈕：
+   - **恢復預設**：還原為 `DEFAULT_CHANNEL_MAP`（AI0~4、DI0~4）
+   - **套用**：驗證 AI、DI 通道皆無重複後套用並存檔
+   - **取消**：放棄變更
+6. 套用後主程式依序執行：
+   ```python
+   CHANNEL_CONFIG.set_map(new_map, save=True)  # 更新單例並寫入 JSON
+   refresh_channel_map()                        # 同步 thresholds 各字典
+   self._ai_reader.refresh_channels()           # 熱重載 AI 讀取器
+   self._di_reader.refresh_channels()           # 熱重載 DI 讀取器
+   ```
+
+### 熱重載機制
+
+`AIReader` / `DIReader` 的 `refresh_channels()` 採「停止 → 重建通道狀態 → 若原本執行中則重新啟動」流程，套用新通道時若監控正在執行也能無縫切換。`thresholds.refresh_channel_map()` 以 in-place 方式更新（`DIAGNOSTIC["channels"][:] = ...`）以保留既有物件參照。
+
+### 非連續通道讀取
+
+使用者可設定任意（甚至非連續）AI 通道，例如 AI 5/6/7/8/9。`AIReader._instant_ai_loop()` 以 `readDataF64(min, max-min+1)` 讀取涵蓋範圍，再以 `col = ch - read_start` 由回傳陣列取出所需通道，兼顧彈性與效率。
+
+### 向後相容
+
+`diagnostic_scanner._build_channel_list()` 對不含 `kind` 欄位的舊通道定義，會依名稱（`Hall*` → hall，其餘 → encoder）自動推斷，確保舊資料與設定仍可運作。
+
+---
+
 ## AI 取樣架構
 
 ### 即時監控模式（InstantAiCtrl 輪詢，10 kHz 標示）
@@ -718,3 +813,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.5.0** | **2026-08-27** | **診斷模式取樣率提升至硬體最高 200 kS/s**：`sample_rate` 200,000 Hz、`chunk_size` 20,000 點、`section_count` 8（緩衝 0.8s）、`display_window` 100,000 點；新增 `HW_MAX_SAMPLE_RATE` 常數、`clamp_clock_rate()` 硬體上限自動偵測；`DiagnosticWidget` 加入繪圖 decimation（≤ 5,000 點）；回放對話框視窗/速度範圍更新；所有相依參數與測試斷言同步更新 |
 | **1.6.0** | **2026-08-27** | **監控預設關閉 + 高速波形診斷分析**：新增「📡 監控開關」toggle 按鈕（連線後預設關閉）；監控模式改為純即時觀察（10 kHz 標示，移除 PASS/FAIL 即時判斷）；新增 `DiagAnalyzer` 對高速波形做 H/L 比例、不定態比例、邊緣計數、頻率估算，診斷完成後輸出各通道與整體 PASS/FAIL；DB 新增 `diag_pass`、`diag_ch_results` 欄位；歷史查詢視窗顯示診斷 PASS/FAIL 與各通道摘要 |
 | **1.7.0** | **2026-09-02** | **Hall/Encoder 脈波比值交叉驗證 + 馬達規格可設定**：新增 `RatioCheckResult` 資料類別與 `DiagAnalyzer._cross_validate_ratio()` 方法，對每相 Hall（U/V/W）單獨與 Encoder 平均頻率做比值檢查（理論比值 = PPR / Hall週期/轉 = 512/90 ≈ 5.689），可偵測單相掉脈波、Encoder 掉脈波、無訊號等異常；`HALL_THRESHOLDS` 新增 `hall_pulses_per_rev=90`；`ENCODER_THRESHOLDS` 新增 `resolution_bits=11`、`ppr` 改為 512；`DIAGNOSTIC.analysis` 新增 `enable_ratio_check=True`、`ratio_tolerance=0.15`；`SessionStartDialog` 新增 Hall 週期/轉、Encoder 解析度 bits、比值容差三個設定欄位（bits 變更自動帶出 PPR 建議值，即時顯示理論比值與允許範圍）；npz metadata 新增四個馬達規格欄位供回放分析還原；模擬模式頻率改為動態計算確保比值正確 |
+| **1.8.0** | **2026-09-14** | **硬體通道彈性設定**：Hall U/V/W 與 Encoder A/B 對應的 AI/DI 通道不再寫死，可由使用者自訂；新增 `config/channel_map.json` 設定檔與 `config/channel_config.py`（`CHANNEL_CONFIG` 單例，含 `DEFAULT_CHANNEL_MAP`、`load/save`、`_merge_defaults`、`value_range(kind)`、`diagnostic_channels()` 等查詢方法）；`config/thresholds.py` 改為動態帶入通道並新增 `refresh_channel_map()`；`ai_reader.py`/`di_reader.py` 重構為動態通道並新增 `refresh_channels()` 熱重載（AI 以 min~max 範圍讀取支援非連續通道）；`diagnostic_scanner.py` 改依 `kind`（hall/encoder）判斷量程與模擬相位並向後相容舊通道定義；`daq_controller._simulate_di()` 依動態通道產生位元；新增 `ui/channel_config_dialog.py` 對話框（AI/DI 通道、AI 量程、DI 埠號設定，含重複通道檢查與恢復預設）；主視窗新增「🔌 硬體通道」按鈕，套用後即時 `set_map`/`refresh_channel_map`/`refresh_channels` 熱套用 |
