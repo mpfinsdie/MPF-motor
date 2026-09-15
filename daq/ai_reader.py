@@ -327,6 +327,15 @@ class AIReader:
         with self._lock:
             return np.array(list(self._timestamps))
 
+    def clear_buffers(self):
+        """清除所有通道的波形緩衝與最新讀值（不影響讀取執行緒運行）"""
+        with self._lock:
+            for ch in self._all_chs:
+                self._buffers[ch].clear()
+                self._latest[ch] = 0.0
+            self._timestamps.clear()
+        print("[AIReader] 波形緩衝已清除")
+
     def get_hall_voltages(self) -> dict:
         """
         取得三相 Hall Sensor 最新電壓

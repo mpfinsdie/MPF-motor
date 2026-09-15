@@ -159,6 +159,18 @@ class DIReader:
             self._last_time_for_rpm = time.time()
         print("[DIReader] Encoder 計數器已重置")
 
+    def clear_buffers(self):
+        """清除 Hall/Encoder 波形緩衝（保留計數與方向狀態）"""
+        with self._lock:
+            for ch in self._hall_di_channels:
+                self._hall_buffers[ch].clear()
+                self._hall_latest[ch] = False
+            self._enc_a_buffer.clear()
+            self._enc_b_buffer.clear()
+            self._enc_count_buffer.clear()
+            self._timestamps.clear()
+        print("[DIReader] 波形緩衝已清除")
+
     def _read_loop(self):
         """背景讀取迴圈"""
         while self._running:

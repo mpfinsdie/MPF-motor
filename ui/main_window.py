@@ -216,6 +216,10 @@ class MainWindow(QMainWindow):
         monitor_page = QWidget()
         monitor_layout = QVBoxLayout(monitor_page)
         monitor_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_layout.setSpacing(4)
+
+        # ── 波形監測控制列（監控開關 + 清除波形）────────────────────────────
+        monitor_layout.addWidget(self._build_monitor_ctrl_bar())
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(4)
@@ -243,6 +247,46 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(self._content_stack)
 
+    def _build_monitor_ctrl_bar(self) -> QWidget:
+        """
+        建立即時波形監測區上方的控制列。
+
+        包含：
+          - 📡 監控開關（由頂部工具列移至此，靠近波形）
+          - 🗑 清除波形（清空目前顯示的即時波形與緩衝）
+        """
+        bar = QWidget()
+        bar.setFixedHeight(40)
+        bar.setStyleSheet("background-color: #252525; border-radius: 4px;")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        section_lbl = QLabel("即時波形監測")
+        section_lbl.setStyleSheet("color: #4AABFF; font-weight: bold; font-size: 12px;")
+        layout.addWidget(section_lbl)
+
+        layout.addStretch()
+
+        # 監控開關（預設關閉，手動啟停即時監控）
+        self._btn_monitor = QPushButton("📡 監控：關")
+        self._btn_monitor.setStyleSheet(BTN_MON_OFF_STYLE)
+        self._btn_monitor.setEnabled(False)   # 連線後才啟用
+        self._btn_monitor.setToolTip(
+            f"即時監控（InstantAI 輪詢，標示 {SAMPLING['ai_sample_rate']:,} Hz）\n"
+            "預設關閉，僅供初步觀察，不做 PASS/FAIL 判斷"
+        )
+        self._btn_monitor.clicked.connect(self._on_toggle_monitor)
+        layout.addWidget(self._btn_monitor)
+
+        # 清除波形（清空目前顯示的即時波形與緩衝）
+        self._btn_clear_wave = QPushButton("🗑 清除")
+        self._btn_clear_wave.setToolTip("清除目前顯示的即時波形與資料緩衝（不影響監控啟停）")
+        self._btn_clear_wave.clicked.connect(self._on_clear_waveform)
+        layout.addWidget(self._btn_clear_wave)
+
+        return bar
+
     def _build_toolbar(self) -> QWidget:
         """建立頂部工具列"""
         toolbar = QWidget()
@@ -266,16 +310,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         # ── 控制按鈕 ──────────────────────────────────────────────────────────
-        # 監控開關（預設關閉，手動啟停即時監控）
-        self._btn_monitor = QPushButton("📡 監控：關")
-        self._btn_monitor.setStyleSheet(BTN_MON_OFF_STYLE)
-        self._btn_monitor.setEnabled(False)   # 連線後才啟用
-        self._btn_monitor.setToolTip(
-            f"即時監控（InstantAI 輪詢，標示 {SAMPLING['ai_sample_rate']:,} Hz）\n"
-            "預設關閉，僅供初步觀察，不做 PASS/FAIL 判斷"
-        )
-        self._btn_monitor.clicked.connect(self._on_toggle_monitor)
-        layout.addWidget(self._btn_monitor)
+        # 注意：監控開關（📡 監控）已移至波形監測區上方的控制列（見 _build_monitor_page）
 
         # 測試物件資訊（連線後可用，輸入馬達序號/操作員）
         self._btn_object = QPushButton("🏷 測試物件")
@@ -311,14 +346,6 @@ class MainWindow(QMainWindow):
         )
         self._btn_diag.clicked.connect(self._on_start_diag)
         layout.addWidget(self._btn_diag)
-
-        # 提早結束診斷（診斷中才可用）
-        self._btn_diag_stop = QPushButton("⏹ 結束診斷")
-        self._btn_diag_stop.setStyleSheet(BTN_DIAG_STOP_STYLE)
-        self._btn_diag_stop.setEnabled(False)
-        self._btn_diag_stop.setToolTip("提早結束診斷，已採資料仍會儲存並分析")
-        self._btn_diag_stop.clicked.connect(self._on_stop_diag)
-        layout.addWidget(self._btn_diag_stop)
 
         self._btn_reset_enc = QPushButton("↺ 重置計數")
         self._btn_reset_enc.clicked.connect(self._on_reset_encoder)
@@ -609,7 +636,6 @@ class MainWindow(QMainWindow):
 
         # ── 6. 更新按鈕狀態 ───────────────────────────────────────────────────
         self._btn_diag.setEnabled(False)
-        self._btn_diag_stop.setEnabled(True)
         self._btn_object.setEnabled(False)
         self._btn_start.setEnabled(False)
         self._btn_monitor.setEnabled(False)   # 診斷中禁用監控開關
@@ -638,21 +664,22 @@ class MainWindow(QMainWindow):
         )
         print("[MainWindow] 高取樣診斷已啟動")
 
-    def _on_stop_diag(self):
-        """使用者按「結束診斷」：提早停止掃描器"""
-        if not self._is_diagnosing or self._diag_scanner is None:
-            return
-        reply = QMessageBox.question(
-            self, "確認提早結束診斷",
-            "確定要提早結束診斷？\n已採集的資料仍會儲存。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
-        self._diag_scanner.stop()
-        self._btn_diag_stop.setEnabled(False)
-        self._status_bar.showMessage("🔬 診斷提早結束，等待資料儲存...")
+    def _on_clear_waveform(self):
+        """清除即時波形顯示與讀值緩衝（不影響監控啟停狀態）"""
+        try:
+            self._waveform_widget.clear_all()
+        except Exception as e:
+            print(f"[MainWindow] 清除波形顯示失敗: {e}")
+        try:
+            self._ai_reader.clear_buffers()
+        except Exception as e:
+            print(f"[MainWindow] 清除 AI 緩衝失敗: {e}")
+        try:
+            self._di_reader.clear_buffers()
+        except Exception as e:
+            print(f"[MainWindow] 清除 DI 緩衝失敗: {e}")
+        self._status_bar.showMessage("🗑 即時波形與緩衝已清除")
+        print("[MainWindow] 即時波形與緩衝已清除")
 
     def _on_diag_chunk(self, ch_idx: int, round_idx: int, chunk, elapsed_s: float):
         """
@@ -789,7 +816,6 @@ class MainWindow(QMainWindow):
         self._diag_widget.clear()
 
         # ── 5. 恢復按鈕狀態（監控維持關閉，讓使用者自行決定是否開啟）────────
-        self._btn_diag_stop.setEnabled(False)
         self._btn_monitor.setEnabled(True)
         self._btn_object.setEnabled(True)
         self._btn_start.setEnabled(True)
