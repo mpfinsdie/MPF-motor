@@ -319,13 +319,7 @@ class MainWindow(QMainWindow):
 
         # ── 控制按鈕 ──────────────────────────────────────────────────────────
         # 注意：監控開關（📡 監控）已移至波形監測區上方的控制列（見 _build_monitor_page）
-
-        # 測試物件資訊（連線後可用，輸入馬達序號/操作員）
-        self._btn_object = QPushButton("🏷 測試物件")
-        self._btn_object.setEnabled(False)
-        self._btn_object.setToolTip("輸入測試物件的馬達序號與操作員（記錄於診斷場次）")
-        self._btn_object.clicked.connect(self._on_open_object_info)
-        layout.addWidget(self._btn_object)
+        # 注意：測試物件（馬達序號/操作員）已移至「高取樣診斷」按下後跳出的輸入視窗
 
         # 參數設置（連線後可用，不需監控開啟）
         self._btn_start = QPushButton("⚙ 參數設置")
@@ -359,10 +353,10 @@ class MainWindow(QMainWindow):
         self._btn_reset_enc.clicked.connect(self._on_reset_encoder)
         layout.addWidget(self._btn_reset_enc)
 
-        self._btn_export = QPushButton("💾 匯出報表")
-        self._btn_export.setObjectName("btn_export")
-        self._btn_export.clicked.connect(self._on_export)
-        layout.addWidget(self._btn_export)
+        # self._btn_export = QPushButton("💾 匯出報表")
+        # self._btn_export.setObjectName("btn_export")
+        # self._btn_export.clicked.connect(self._on_export)
+        # layout.addWidget(self._btn_export)
 
         self._btn_history = QPushButton("📋 歷史記錄")
         self._btn_history.setObjectName("btn_history")
@@ -481,9 +475,8 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(
                 f"裝置已連線: {mode} | 監控預設關閉，按「監控：關」啟動即時觀察，或直接按「高取樣診斷」"
             )
-            # 連線後啟用監控開關、測試物件、參數設置、高取樣診斷按鈕
+            # 連線後啟用監控開關、參數設置、高取樣診斷按鈕
             self._btn_monitor.setEnabled(True)
-            self._btn_object.setEnabled(True)
             self._btn_start.setEnabled(True)
             self._btn_diag.setEnabled(True)
 
@@ -509,7 +502,6 @@ class MainWindow(QMainWindow):
                 self._status_bar.showMessage("⚠ 模擬模式 | 監控預設關閉，按「監控：關」啟動即時觀察")
                 print("[MainWindow] 使用者選擇切換至模擬模式")
                 self._btn_monitor.setEnabled(True)
-                self._btn_object.setEnabled(True)
                 self._btn_start.setEnabled(True)
                 self._btn_diag.setEnabled(True)
             else:
@@ -518,7 +510,6 @@ class MainWindow(QMainWindow):
                 self._device_status_lbl.setStyleSheet("color: #FF4444; font-size: 12px;")
                 self._status_bar.showMessage("裝置連線失敗，請檢查 USB-4716 連接後重新連線")
                 self._btn_monitor.setEnabled(False)
-                self._btn_object.setEnabled(False)
                 self._btn_start.setEnabled(False)
                 self._btn_diag.setEnabled(False)
 
@@ -580,7 +571,7 @@ class MainWindow(QMainWindow):
     # ─── 診斷控制事件 ──────────────────────────────────────────────────────────
 
     def _on_start_diag(self):
-        """使用者按「高取樣診斷」：暫停監控（若有），切換到診斷視圖，啟動掃描器"""
+        """使用者按「高取樣診斷」：先輸入測試物件資訊，暫停監控（若有），切換到診斷視圖，啟動掃描器"""
         if not self._daq.is_connected:
             QMessageBox.warning(self, "警告", "裝置未連線，請先連線 USB-4716")
             return
@@ -588,25 +579,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "診斷已在進行中")
             return
 
-        # 確認對話框
-        ch_count = len(DIAGNOSTIC["channels"])
-        total_s  = ch_count * DIAGNOSTIC["seconds_per_ch"] * DIAGNOSTIC["rounds"]
-        serial_hint = f"序號：{self._param_serial_no}" if self._param_serial_no else "（序號未設定，可先按「參數設置」輸入）"
-        reply = QMessageBox.question(
-            self, "啟動高取樣率診斷",
-            f"即將啟動高取樣率診斷：\n\n"
-            f"  • {ch_count} 個通道，每通道 {DIAGNOSTIC['seconds_per_ch']} 秒\n"
-            f"  • 取樣率：{DIAGNOSTIC['sample_rate']:,} Hz\n"
-            f"  • 共 {DIAGNOSTIC['rounds']} 輪，預計 {total_s} 秒\n"
-            f"  • {serial_hint}\n\n"
-            f"診斷期間將暫停即時監控（若已開啟）。\n"
-            f"完成後自動分析 PASS/FAIL，資料存成 npz 並寫入歷史記錄。\n\n"
-            f"確定開始？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
+        # ── 先跳出「測試物件資訊」輸入視窗（取代原確認對話框）────────────────
+        # 使用者輸入馬達序號/操作員後按確定即立即開始診斷；取消則中止。
+        obj_dlg = ObjectInfoDialog(
+            parent=self,
+            serial_no=self._param_serial_no,
+            operator=self._param_operator,
         )
-        if reply != QMessageBox.Yes:
+        if obj_dlg.exec_() != ObjectInfoDialog.Accepted:
             return
+
+        obj_info = obj_dlg.get_object_info()
+        self._param_serial_no = obj_info["serial_no"]
+        self._param_operator  = obj_info["operator"]
 
         # ── 1. 停止監控（若有開啟），釋放 InstantAI ──────────────────────────
         if self._is_monitoring:
@@ -644,7 +629,6 @@ class MainWindow(QMainWindow):
 
         # ── 6. 更新按鈕狀態 ───────────────────────────────────────────────────
         self._btn_diag.setEnabled(False)
-        self._btn_object.setEnabled(False)
         self._btn_start.setEnabled(False)
         self._btn_monitor.setEnabled(False)   # 診斷中禁用監控開關
 
@@ -825,35 +809,18 @@ class MainWindow(QMainWindow):
 
         # ── 5. 恢復按鈕狀態（監控維持關閉，讓使用者自行決定是否開啟）────────
         self._btn_monitor.setEnabled(True)
-        self._btn_object.setEnabled(True)
         self._btn_start.setEnabled(True)
         self._btn_diag.setEnabled(True)
 
-        # ── 6. 顯示診斷結果摘要（含 PASS/FAIL 分析，可捲動對話框）────────────
+        # ── 6. 顯示診斷結果（僅 PASS / FAIL，詳細文字與波型請至歷史記錄查閱）─
         status = "✔ 完成" if completed else "⚠ 提早結束"
-        npz_note = f"\n📁 資料已儲存：\n{npz_path}" if npz_path else "\n⚠ 資料儲存失敗"
 
         if diag_analysis is not None:
-            overall_str  = "✔ PASS" if diag_pass else "✘ FAIL"
-            analysis_note = (
-                f"\n─── 診斷分析結果 ───\n"
-                f"{diag_analysis.summary_text}"
-            )
+            overall_str = "PASS" if diag_pass else "FAIL"
         else:
-            overall_str   = "— 未分析"
-            analysis_note = "\n（無原始資料可分析）"
+            overall_str = "— 未分析"
 
-        full_text = (
-            f"高取樣率診斷{status}\n\n"
-            f"已完成輪數：{rounds_done} / {DIAGNOSTIC['rounds']}\n"
-            f"實際時長：{duration_s:.0f} 秒\n"
-            f"取樣率：{DIAGNOSTIC['sample_rate']:,} Hz\n"
-            f"診斷結果：{overall_str}"
-            f"{analysis_note}"
-            f"{npz_note}\n\n"
-            f"可在「歷史記錄」中回看診斷波形。"
-        )
-        self._show_diag_result_dialog("診斷完成", full_text)
+        self._show_diag_pass_fail_dialog(diag_pass, diag_analysis is not None)
 
         self._status_bar.showMessage(
             f"診斷{status} | {rounds_done}/{DIAGNOSTIC['rounds']} 輪 | "
@@ -862,57 +829,53 @@ class MainWindow(QMainWindow):
         )
         print(f"[MainWindow] 診斷完成，監控維持關閉狀態")
 
-    # ─── 診斷結果可捲動對話框 ──────────────────────────────────────────────────
+    # ─── 診斷結果 PASS / FAIL 對話框 ───────────────────────────────────────────
 
-    def _show_diag_result_dialog(self, title: str, text: str):
+    def _show_diag_pass_fail_dialog(self, diag_pass, analyzed: bool):
         """
-        顯示可捲動的診斷結果對話框。
+        顯示診斷結果對話框（僅 PASS / FAIL）。
 
-        診斷報告（含比值交叉驗證）文字較長，使用 QDialog + QTextEdit
-        取代 QMessageBox，讓使用者可以上下捲動閱讀完整報告。
+        依需求，診斷完成後只顯示大字的 PASS 或 FAIL 結果，
+        詳細分析文字與波型請至「歷史記錄」查閱。
 
         Args:
-            title: 對話框標題
-            text:  報告全文（純文字）
+            diag_pass: 是否 PASS（True/False；None 代表未分析）
+            analyzed:  是否有進行分析（無原始資料時為 False）
         """
-        from PyQt5.QtWidgets import (
-            QDialog, QVBoxLayout, QTextEdit, QDialogButtonBox
-        )
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QDialogButtonBox
         from PyQt5.QtGui import QFont
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        dlg.setMinimumSize(560, 480)
-        dlg.resize(620, 560)
+        dlg.setWindowTitle("診斷完成")
+        dlg.setMinimumSize(320, 220)
+        dlg.setStyleSheet("QDialog { background-color: #1E1E1E; }")
 
         layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(16)
 
-        # 可捲動文字區域（唯讀）
-        text_edit = QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setPlainText(text)
-        text_edit.setFont(QFont("Consolas", 10))
-        text_edit.setStyleSheet(
-            "QTextEdit {"
-            "  background-color: #1E1E1E;"
-            "  color: #CCCCCC;"
-            "  border: 1px solid #444444;"
-            "  border-radius: 4px;"
-            "}"
-            "QScrollBar:vertical {"
-            "  background: #2A2A2A;"
-            "  width: 12px;"
-            "}"
-            "QScrollBar::handle:vertical {"
-            "  background: #555555;"
-            "  border-radius: 6px;"
-            "}"
-        )
-        layout.addWidget(text_edit)
+        if not analyzed or diag_pass is None:
+            result_text  = "— 未分析"
+            result_color = "#AAAAAA"
+        elif diag_pass:
+            result_text  = "PASS"
+            result_color = "#44DD44"
+        else:
+            result_text  = "FAIL"
+            result_color = "#FF4444"
 
-        # 確認按鈕
+        result_lbl = QLabel(result_text)
+        result_lbl.setAlignment(Qt.AlignCenter)
+        result_lbl.setFont(QFont("Arial", 48, QFont.Bold))
+        result_lbl.setStyleSheet(f"color: {result_color};")
+        layout.addWidget(result_lbl)
+
+        hint_lbl = QLabel("詳細分析文字與波型請至「歷史記錄」查閱")
+        hint_lbl.setAlignment(Qt.AlignCenter)
+        hint_lbl.setStyleSheet("color: #888888; font-size: 12px;")
+        hint_lbl.setWordWrap(True)
+        layout.addWidget(hint_lbl)
+
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
         btn_box.accepted.connect(dlg.accept)
         btn_box.setStyleSheet(
@@ -921,38 +884,14 @@ class MainWindow(QMainWindow):
             "  color: #CCCCCC;"
             "  border: 1px solid #555555;"
             "  border-radius: 4px;"
-            "  padding: 6px 20px;"
+            "  padding: 6px 24px;"
             "}"
             "QPushButton:hover { background-color: #3A3A3A; }"
             "QPushButton:pressed { background-color: #1A1A1A; }"
         )
         layout.addWidget(btn_box)
 
-        # 捲動至頂部
-        text_edit.moveCursor(text_edit.textCursor().Start)
-
         dlg.exec_()
-
-    # ─── 測試物件資訊事件 ──────────────────────────────────────────────────────
-
-    def _on_open_object_info(self):
-        """操作員按「測試物件」：開啟對話框輸入馬達序號/操作員（供診斷場次記錄）"""
-        dlg = ObjectInfoDialog(
-            parent=self,
-            serial_no=self._param_serial_no,
-            operator=self._param_operator,
-        )
-        if dlg.exec_() != ObjectInfoDialog.Accepted:
-            return
-
-        info = dlg.get_object_info()
-        self._param_serial_no = info["serial_no"]
-        self._param_operator  = info["operator"]
-
-        serial_display = f"序號: {self._param_serial_no}" if self._param_serial_no else "序號: (未輸入)"
-        operator_display = f"操作員: {self._param_operator}" if self._param_operator else "操作員: (未輸入)"
-        self._status_bar.showMessage(f"測試物件已設定 | {serial_display} | {operator_display}")
-        print(f"[MainWindow] 測試物件已設定 | {serial_display} | {operator_display}")
 
     # ─── 參數設置事件 ──────────────────────────────────────────────────────────
 
