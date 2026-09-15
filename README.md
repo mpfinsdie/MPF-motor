@@ -8,13 +8,13 @@
 ## 功能特色
 
 ### Hall Sensor (3.3V 系統)
-- AI 通道量測三相 (U/V/W) 電壓準位（InstantAI 輪詢監控，診斷模式可達 200,000 Hz/通道）
+- AI 通道量測三相 (U/V/W) 電壓準位（監控 WaveformAI 連續串流 20,000 Hz/通道，診斷模式可達 200,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - AI 與 DI 一致性驗證
 - 電壓閾值判斷：H > 2.0V，L < 0.8V（可調整）
 
 ### Encoder (5V 系統)
-- AI 通道量測 A/B 相電壓準位（InstantAI 輪詢監控，診斷模式可達 200,000 Hz/通道）
+- AI 通道量測 A/B 相電壓準位（監控 WaveformAI 連續串流 20,000 Hz/通道，診斷模式可達 200,000 Hz/通道）
 - DI 通道讀取 H/L 數位狀態
 - 電壓閾值判斷：H > 3.5V，L < 1.5V（可調整）
 - 軟體正交解碼（A/B 相位差 90°）
@@ -28,13 +28,13 @@
 - **即時套用**：設定後立即熱重載（`refresh_channels()`），無需重啟程式
 - **JSON 設定檔持久化**：設定存於 `config/channel_map.json`，下次啟動自動載入；缺漏欄位自動以預設值補齊
 - **重複通道檢查**：套用前驗證 AI、DI 通道不重複，避免衝突
-- **非連續通道支援**：可設定任意通道（如 AI 5/6/7/8/9），InstantAI 以 min~max 範圍讀取後依欄位索引取出
+- **非連續通道支援**：可設定任意通道（如 AI 5/6/7/8/9），WaveformAI 以 min~max 範圍掃描後依欄位索引解交錯取出
 
 ### GUI 介面
 - PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形（AI 電壓，含閾值線）
-- **即時觀察面板（10 kHz 監控）**：顯示各通道即時電壓與 H/L/X 準位（不做 PASS/FAIL 判斷）
+- **即時觀察面板（20 kHz/通道 連續串流）**：顯示各通道即時電壓與 H/L/X 準位（不做 PASS/FAIL 判斷）
 - **🆕 Hall 相序即時判斷（v1.9 新增）**：即時觀察面板底部顯示 Hall 相序方向（✓ CW / ✓ CCW / ✗ Error），依 UVW 二進制狀態跳轉判斷旋轉方向與訊號正確性
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
@@ -57,7 +57,7 @@
 - **🆕 馬達規格可設定**：Hall 每轉週期數、Encoder 解析度（bits）、PPR、比值容差均可在「⚙ 參數設置」對話框調整，適應不同馬達規格
 
 ### 測試場次管理（v1.1 新增）
-- 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 10 kHz 即時觀察，確認訊號後再手動觸發檢測
+- 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 20 kHz/通道 即時觀察，確認訊號後再手動觸發檢測
 - 每次檢測前可輸入**馬達序號**、操作員名稱，並設定量測參數（PPR、電壓閾值）
 - 預設 **5 分鐘**計時，可調整（1~60 分鐘），支援提前停止
 - 結果**自動儲存至 SQLite 資料庫**，不需手動操作
@@ -198,7 +198,7 @@ python main.py
   ↓
 自動連線 USB-4716（連線成功後監控預設關閉）
   ↓
-按「📡 監控開關」啟動 10 kHz 即時觀察（可選）
+按「📡 監控開關」啟動 20 kHz/通道 即時觀察（可選）
   ↓
 觀察即時波形，確認訊號穩定
   ↓
@@ -217,7 +217,7 @@ python main.py
 
 | 按鈕 | 說明 |
 |------|------|
-| **📡 監控開關** | 切換 10 kHz 即時監控（AI/DI 輪詢）開/關；連線後預設關閉 |
+| **📡 監控開關** | 切換即時監控（AI WaveformAI 連續串流 20 kHz/通道 + DI 輪詢）開/關；連線後預設關閉 |
 | **🏷 測試物件** | 開啟測試物件對話框，輸入馬達序號、操作員（記錄於診斷場次） |
 | **⚙ 參數設置** | 開啟量測參數對話框，設定 Hall/Encoder 規格與電壓閾值；可存成馬達型號 profile 切換套用 |
 | **🔬 高取樣診斷** | 啟動高取樣率診斷模式（暫停監控，逐 CH 200kHz 採樣，完成後自動分析 PASS/FAIL） |
@@ -367,7 +367,7 @@ MPF-motor/
 ├── daq/
 │   ├── __init__.py
 │   ├── daq_controller.py          # USB-4716 裝置控制器（含診斷模式切換）
-│   ├── ai_reader.py               # 類比輸入讀取（InstantAI 輪詢，監控用，預設關閉）
+│   ├── ai_reader.py               # 類比輸入讀取（WaveformAI 多通道連續串流 20kHz/通道，監控用，預設關閉）
 │   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 軟體計數）
 │
 ├── db/                            # 資料庫模組（v1.1 新增）
@@ -388,7 +388,7 @@ MPF-motor/
 │   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式）
 │   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
-│   ├── result_panel.py            # 即時觀察面板（10 kHz 監控，僅顯示電壓/準位，無 PASS/FAIL）
+│   ├── result_panel.py            # 即時觀察面板（20 kHz/通道 連續串流，僅顯示電壓/準位，無 PASS/FAIL）
 │   ├── session_dialog.py          # 量測參數設置對話框（含馬達型號 profile 管理）
 │   ├── object_info_dialog.py      # 測試物件資訊對話框（馬達序號 / 操作員）
 │   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
@@ -405,7 +405,7 @@ MPF-motor/
 
 ### 設計動機
 
-原本監控模式使用 `InstantAiCtrl` 同時輪詢 5 個 AI 通道，實際每通道取樣率約 100 Hz，不足以捕捉 Hall Sensor 與 Encoder 的高頻細節。診斷模式改用 `WaveformAiCtrl` 單通道高速採樣，達到硬體最高 **200,000 Hz**（USB-4716 單通道上限）。
+早期監控模式使用 `InstantAiCtrl` 同時輪詢 5 個 AI 通道，實際每通道取樣率約 100 Hz，不足以捕捉 Hall Sensor 與 Encoder 的高頻細節。**v1.9 起監控模式改用 `WaveformAiCtrl` 多通道硬體連續串流，每通道實際 20,000 Hz**。診斷模式則使用 `WaveformAiCtrl` 單通道高速採樣，達到硬體最高 **200,000 Hz**（USB-4716 單通道上限）。
 
 ### 硬體互斥設計
 
@@ -739,21 +739,30 @@ HallLivePanel 底部相序標籤（即時更新）
 
 ## AI 取樣架構
 
-### 即時監控模式（InstantAiCtrl 輪詢，10 kHz 標示）
+### 即時監控模式（WaveformAiCtrl 多通道連續串流，v1.9 提升至 20 kHz/通道）
 
-即時監控使用 `InstantAiCtrl` 逐次輪詢，非硬體連續採樣，實際取樣率受 OS 排程限制（約 100 Hz）。
-`config/thresholds.py` 中 `SAMPLING["ai_sample_rate"]` 標示為 **10,000 Hz**（文件標示用途，輪詢速率不變）。
+即時監控自 v1.9 起改用 `WaveformAiCtrl` **多通道硬體 DMA 連續串流**，每個通道實際以
+**20,000 Hz** 硬體採樣（不再是 `InstantAiCtrl` 逐次輪詢的 ~100 Hz）。
+`config/thresholds.py` 中 `SAMPLING["ai_sample_rate"]` = **20,000 Hz**（每通道真實硬體取樣率）。
+
+多通道採樣時，`conversion.clockRate` 為**每通道**取樣率，硬體總取樣率 =
+`ai_sample_rate × 通道數`（5 CH × 20 kHz = 100 kS/s），仍在 USB-4716 總頻寬
+（`HW_MAX_SAMPLE_RATE` = 200 kS/s）之內。`getDataF64` 取回**交錯（interleaved）**資料，
+背景執行緒依 `channelCount` 解交錯（reshape）後分配至各通道 deque。
 
 > ⚠️ **注意**：監控模式連線後**預設關閉**，需手動按「📡 監控開關」啟動。監控僅用於初步觀察，不做 PASS/FAIL 判斷。
 
 ```
-USB-4716 InstantAiCtrl
-  │  每 10ms 呼叫 readDataF64(0, 5) 讀取 5 通道
+USB-4716 硬體 ADC（多通道掃描）
+  │  每通道 20,000 Hz（conversion.clockRate；channelStart~channelCount 涵蓋所有 AI 通道）
+  ↓ DMA
+硬體環形緩衝區（sectionLength=2000 × sectionCount=0 無限循環）
+  │  每累積 2,000 點/通道觸發一次讀取（約每 100ms）
   ↓
-AIReader._instant_ai_loop()（背景執行緒）
-  │  存入 deque 滾動緩衝（10,000 點）
+AIReader._waveform_ai_loop() → getDataF64(chunk×通道數) → reshape 解交錯
+  │  各通道存入 deque 滾動緩衝（20,000 點/通道 = 1 秒）
   ↓
-UI callback → 波形顯示（20 Hz 刷新）+ 即時觀察面板（電壓/H/L/X 準位）
+UI callback → 波形顯示（20 Hz 刷新，自動 decimation ≤ 4,000 點）+ 即時觀察面板（電壓/H/L/X 準位）
 ```
 
 ### 診斷模式（WaveformAiCtrl 單通道高速串流，v1.5 提升至 200 kS/s）
@@ -775,26 +784,28 @@ npz 儲存（每通道 2,000,000 點 ≈ 7.6 MB float32）
 
 ### 效能對比
 
-| 項目 | 即時監控（InstantAI） | 診斷模式（WaveformAI，v1.5） |
+| 項目 | 即時監控（WaveformAI，v1.9） | 診斷模式（WaveformAI，v1.5） |
 |------|----------------------|----------------------|
-| AI 取樣架構 | 逐次 USB 輪詢 | 硬體 DMA 串流（單通道） |
-| 實際 AI 取樣率 | ~100 Hz | **200,000 Hz/通道** |
-| 標示取樣率 | **10,000 Hz**（文件標示） | **200,000 Hz** |
+| AI 取樣架構 | 硬體 DMA 串流（多通道掃描） | 硬體 DMA 串流（單通道） |
+| 實際 AI 取樣率 | **20,000 Hz/通道** | **200,000 Hz/通道** |
+| 標示取樣率 | **20,000 Hz/通道**（真實硬體） | **200,000 Hz** |
 | 預設啟動 | **關閉**（手動按鈕啟動） | 按「🔬 高取樣診斷」啟動 |
 | PASS/FAIL 判斷 | **無**（僅顯示電壓/準位） | **有**（DiagAnalyzer 分析） |
 | GUI 刷新率 | 20 Hz | **10 Hz（每 0.1s 一段）** |
-| 波形緩衝點數 | 10,000 點 | **100,000 點（0.5 秒）** |
-| 繪圖降採樣 | 無 | **自動 decimation（≤ 5,000 點）** |
-| 硬體緩衝深度 | — | **160,000 點（0.8s），防 overrun** |
+| 波形緩衝點數 | 20,000 點/通道（1 秒） | **100,000 點（0.5 秒）** |
+| 繪圖降採樣 | **自動 decimation（≤ 4,000 點）** | **自動 decimation（≤ 5,000 點）** |
+| 硬體緩衝深度 | 16,000 點/通道（0.8s） | **160,000 點（0.8s），防 overrun** |
 
 ### 取樣參數設定（`config/thresholds.py`）
 
 | 參數 | 值 | 說明 |
 |------|--------|------|
-| `HW_MAX_SAMPLE_RATE` | **200,000 Hz** | 硬體最高取樣率（USB-4716 單通道上限） |
-| `ai_sample_rate` | **10,000 Hz** | InstantAI 監控標示取樣率（文件用，輪詢速率不變） |
-| `buffer_size` | **10,000** | 監控波形顯示緩衝點數 |
-| `section_length` | **20,000** | 診斷模式每 section 樣本數（0.1s @ 200kHz） |
+| `HW_MAX_SAMPLE_RATE` | **200,000 Hz** | 硬體最高取樣率（USB-4716 單通道上限；多通道時為總頻寬共享） |
+| `ai_sample_rate` | **20,000 Hz** | 監控每通道真實硬體取樣率（WaveformAI 多通道連續串流） |
+| `monitor_chunk_size` | **2,000** | 監控串流每通道分段讀取點數（0.1s @ 20kHz，維持 10 Hz 回呼） |
+| `buffer_size` | **20,000** | 監控波形顯示緩衝點數（20kHz × 1s = 20,000 點/通道） |
+| `display_max_points` | **4,000** | 監控繪圖降採樣上限（超過則自動 decimation） |
+| `section_length` | **2,000** | 監控 WaveformAI 每 section 樣本數（與 chunk 對齊）／診斷模式為 20,000 |
 | `section_count` | **8** | 診斷模式環形緩衝 section 數（總緩衝 0.8s） |
 | `display_update_ms` | 50 ms | GUI 刷新間隔（20 Hz） |
 
@@ -834,7 +845,7 @@ USB-4716 **無硬體計數器**，Encoder 使用 Python 軟體輪詢計數（DI 
 | 可靠最高頻率 | ~1~5 kHz（依系統負載） |
 | 建議最高轉速 | 300 RPM @ 1000 PPR |
 
-> 💡 AI 電壓波形已改用 WaveformAI 硬體串流（10 kHz），不受此限制影響。
+> 💡 AI 電壓波形已改用 WaveformAI 硬體連續串流（監控 20 kHz/通道、診斷 200 kHz/通道），不受此限制影響。
 > 若需更高轉速量測，建議降低 Encoder PPR 或改用具硬體計數器的 DAQ 模組（如 USB-4751）。
 
 ---
@@ -923,3 +934,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.7.0** | **2026-09-02** | **Hall/Encoder 脈波比值交叉驗證 + 馬達規格可設定**：新增 `RatioCheckResult` 資料類別與 `DiagAnalyzer._cross_validate_ratio()` 方法，對每相 Hall（U/V/W）單獨與 Encoder 平均頻率做比值檢查（理論比值 = PPR / Hall週期/轉 = 512/90 ≈ 5.689），可偵測單相掉脈波、Encoder 掉脈波、無訊號等異常；`HALL_THRESHOLDS` 新增 `hall_pulses_per_rev=90`；`ENCODER_THRESHOLDS` 新增 `resolution_bits=11`、`ppr` 改為 512；`DIAGNOSTIC.analysis` 新增 `enable_ratio_check=True`、`ratio_tolerance=0.15`；`SessionStartDialog` 新增 Hall 週期/轉、Encoder 解析度 bits、比值容差三個設定欄位（bits 變更自動帶出 PPR 建議值，即時顯示理論比值與允許範圍）；npz metadata 新增四個馬達規格欄位供回放分析還原；模擬模式頻率改為動態計算確保比值正確 |
 | **1.8.0** | **2026-09-14** | **硬體通道彈性設定**：Hall U/V/W 與 Encoder A/B 對應的 AI/DI 通道不再寫死，可由使用者自訂；新增 `config/channel_map.json` 設定檔與 `config/channel_config.py`（`CHANNEL_CONFIG` 單例，含 `DEFAULT_CHANNEL_MAP`、`load/save`、`_merge_defaults`、`value_range(kind)`、`diagnostic_channels()` 等查詢方法）；`config/thresholds.py` 改為動態帶入通道並新增 `refresh_channel_map()`；`ai_reader.py`/`di_reader.py` 重構為動態通道並新增 `refresh_channels()` 熱重載（AI 以 min~max 範圍讀取支援非連續通道）；`diagnostic_scanner.py` 改依 `kind`（hall/encoder）判斷量程與模擬相位並向後相容舊通道定義；`daq_controller._simulate_di()` 依動態通道產生位元；新增 `ui/channel_config_dialog.py` 對話框（AI/DI 通道、AI 量程、DI 埠號設定，含重複通道檢查與恢復預設）；主視窗新增「🔌 硬體通道」按鈕，套用後即時 `set_map`/`refresh_channel_map`/`refresh_channels` 熱套用 |
 | **1.9.0** | **2026-09-14** | **Hall 相序即時判斷**：`logic/hall_analyzer.py` 新增 `HallSequenceDetector` 類別，將三相 Hall（U/V/W）狀態編碼為二進制整數（U=bit0、V=bit1、W=bit2），依相鄰狀態跳轉比對 CW（5→1→3→2→6→4）/ CCW（4→6→2→3→1→5）合法轉換表，判斷旋轉方向與訊號正確性；保留最近 6 個不同狀態（一電氣週期），忽略無效狀態（0/7）與未變化狀態，輸出 CW / CCW / Error / ---；`ui/result_panel.py` 的 `HallLivePanel` 底部新增獨立相序標籤（✓ CW 綠 / ✓ CCW 藍 / ✗ Error 紅 / --- 灰），`update_voltages()`、`update_live_voltages()` 新增相序參數；`ui/main_window.py` 於 `_update_analysis()` 補上 `get_hall_states()` 讀取（同時修正 Hall DI 狀態顯示）並整合相序偵測 |
+| **1.10.0** | **2026-09-15** | **即時監控改用 WaveformAI 多通道連續串流（20 kHz/通道）**：`daq/ai_reader.py` 由 `InstantAiCtrl` 逐次輪詢（實際 ~100 Hz）改為 `WaveformAiCtrl` 多通道硬體 DMA 連續串流，每通道真實硬體取樣率提升至 **20,000 Hz**；conversion 以 `channelStart~channelCount` 涵蓋所有 AI 通道（支援非連續通道）、`clockRate` 為每通道取樣率，`getDataF64` 回傳交錯資料後以 numpy `reshape` 解交錯分配各通道 deque；模擬模式改為向量化分段產生（節奏對齊硬體）；`daq/daq_controller.py` 新增監控專用 `create_monitor_wfm_ctrl()`/`release_monitor_wfm_ctrl()`/`get_monitor_wfm_ctrl()`（與診斷 WaveformAiCtrl 分離，進入診斷模式前自動釋放，避免 AI 硬體資源競用）；`config/thresholds.py` 的 `SAMPLING` 更新為 `ai_sample_rate=20_000`、新增 `monitor_chunk_size=2_000`、`section_length=2_000`、`buffer_size=20_000`、`display_max_points=4_000`；`ui/waveform_widget.py` 波形繪製加入自動 decimation（≤ 4,000 點）；UI 標示（監控按鈕 tooltip、狀態列、即時觀察面板標題）同步更新為 20 kHz/通道 連續串流 |

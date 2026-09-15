@@ -33,8 +33,26 @@ class WaveformWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._buffer_size = SAMPLING["buffer_size"]
+        # 繪圖降採樣上限：20kHz 監控下每通道緩衝達 20,000 點，
+        # 直接繪製 5 條曲線會拖累 UI，超過此上限時等間距抽稀（decimation）
+        self._max_plot_points = SAMPLING.get("display_max_points", 4_000)
         self._setup_ui()
         self._setup_plots()
+
+    def _decimate(self, data: np.ndarray):
+        """
+        繪圖降採樣：資料點數超過 _max_plot_points 時等間距抽稀。
+
+        Returns:
+            (x, y)：抽稀後的 X 軸索引與 Y 值（維持原始 X 座標尺度）
+        """
+        n = len(data)
+        if n > self._max_plot_points:
+            step = max(1, n // self._max_plot_points)
+            y = data[::step]
+            x = np.arange(0, n, step)[:len(y)]
+            return x, y
+        return np.arange(n), data
 
     def _setup_ui(self):
         """建立 UI 佈局"""
@@ -132,13 +150,14 @@ class WaveformWidget(QWidget):
             v_data: Hall V 電壓陣列
             w_data: Hall W 電壓陣列
         """
-        n = len(u_data)
-        if n == 0:
+        if len(u_data) == 0:
             return
-        x = np.arange(n)
-        self._hall_curves["U"].setData(x, u_data)
-        self._hall_curves["V"].setData(x, v_data)
-        self._hall_curves["W"].setData(x, w_data)
+        xu, yu = self._decimate(u_data)
+        xv, yv = self._decimate(v_data)
+        xw, yw = self._decimate(w_data)
+        self._hall_curves["U"].setData(xu, yu)
+        self._hall_curves["V"].setData(xv, yv)
+        self._hall_curves["W"].setData(xw, yw)
 
     def update_encoder_waveform(
         self,
@@ -155,12 +174,12 @@ class WaveformWidget(QWidget):
             a_di: 保留參數（不使用）
             b_di: 保留參數（不使用）
         """
-        n = len(a_voltage)
-        if n == 0:
+        if len(a_voltage) == 0:
             return
-        x = np.arange(n)
-        self._enc_curves["A"].setData(x, a_voltage)
-        self._enc_curves["B"].setData(x, b_voltage)
+        xa, ya = self._decimate(a_voltage)
+        xb, yb = self._decimate(b_voltage)
+        self._enc_curves["A"].setData(xa, ya)
+        self._enc_curves["B"].setData(xb, yb)
 
     def clear_all(self):
         """清除所有波形"""

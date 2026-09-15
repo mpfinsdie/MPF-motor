@@ -326,7 +326,7 @@ class ResultPanel(QWidget):
         layout.setSpacing(8)
 
         # 標題
-        title = QLabel("即時觀察（10 kHz 監控）")
+        title = QLabel("即時觀察（20 kHz/通道 連續串流）")
         title.setFont(QFont("Arial", 11, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #CCCCCC; padding: 4px;")

@@ -54,21 +54,27 @@ AI_RANGE = {
     "encoder": CHANNEL_CONFIG.value_range_name("encoder"),  # 0~10V 單極性（Encoder 5V 訊號）
 }
 
-# ─── 即時監控取樣設定（InstantAiCtrl 輪詢模式）────────────────────────────────
-# 注意：InstantAiCtrl 為逐次輪詢架構，非硬體連續採樣，
-#       ai_sample_rate 僅作為文件標示常數（10 kHz），實際輪詢速率受 OS 排程限制（約 100~1000 Hz）
-#       即時監控模式預設關閉，需手動按「監控開關」按鈕啟動，僅供初步觀察使用
+# ─── 即時監控取樣設定（WaveformAiCtrl 多通道連續串流模式，v1.9）──────────────
+# v1.9 起即時監控改用 WaveformAiCtrl 多通道硬體 DMA 連續串流，
+# 每個通道實際以 ai_sample_rate（20 kHz）硬體取樣，不再是 InstantAiCtrl 逐次輪詢。
+#   硬體 ADC → DMA → 環形緩衝區 → 背景執行緒 getDataF64 → 解交錯分配各通道 → UI 顯示
+# 監控模式預設關閉，需手動按「監控開關」按鈕啟動，僅供初步觀察，不做 PASS/FAIL 判斷。
+#
+# 多通道總取樣率 = ai_sample_rate × 通道數（5 CH × 20kHz = 100 kS/s），
+# 仍在 USB-4716 硬體總頻寬（HW_MAX_SAMPLE_RATE = 200 kS/s）之內。
 SAMPLING = {
-    "ai_sample_rate":    10_000,  # 即時監控標示取樣率 (Hz)，10 kHz（僅文件標示，非硬體連續採樣）
-                                  # 實際 InstantAiCtrl 輪詢速率約 100 Hz（每 10ms 一次）
-    "section_length":    20_000,  # WaveformAI 每 section 樣本數（每通道）
-                                  # DataReady 觸發間隔 = section_length / ai_sample_rate
-                                  # = 20000 / 200000 = 0.1s（維持 10 Hz 回呼頻率）
+    "ai_sample_rate":    20_000,  # 即時監控每通道取樣率 (Hz)，20 kHz（WaveformAiCtrl 硬體連續採樣）
+                                  # 多通道總取樣率 = 20kHz × 通道數，需 ≤ HW_MAX_SAMPLE_RATE
+    "monitor_chunk_size": 2_000,  # 監控串流每通道分段讀取點數
+                                  # DataReady 觸發間隔 = monitor_chunk_size / ai_sample_rate
+                                  # = 2000 / 20000 = 0.1s（維持 10 Hz 回呼頻率，避免 UI 卡頓）
+    "section_length":    2_000,   # WaveformAI 每 section 樣本數（每通道），與 monitor_chunk_size 對齊
     "section_count":     8,       # WaveformAI 環形緩衝 section 數
-                                  # 總緩衝深度 = 8 × 20000 = 160,000 點/通道（0.8s）
+                                  # 總緩衝深度 = 8 × 2000 = 16,000 點/通道（0.8s @ 20kHz）
     "di_poll_interval":  0.0001,  # DI 輪詢間隔 (秒) = 10 kHz（DI 不受 AI 取樣率影響）
     "display_update_ms": 50,      # GUI 更新間隔 (ms)，20 Hz 刷新
-    "buffer_size":       10_000,  # 波形顯示緩衝點數（10kHz × 1s = 10,000 點）
+    "buffer_size":       20_000,  # 波形顯示緩衝點數（20kHz × 1s = 20,000 點/通道）
+    "display_max_points": 4_000,  # 繪圖降採樣上限（超過則 decimation，維持 UI 流暢）
 }
 
 # ─── 高取樣率診斷設定（WaveformAiCtrl 單通道高速串流）────────────────────────

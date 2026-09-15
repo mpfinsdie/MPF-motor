@@ -56,7 +56,8 @@ class DAQController:
     def __init__(self, device_description: str = None):
         self.device_description = device_description or self.DEVICE_DESCRIPTION
         self._wfm_ctrl      = None   # WaveformAiCtrl（高速 AI 串流，診斷用）
-        self._instant_ai    = None   # InstantAiCtrl（即時 AI 輪詢，監控用）
+        self._monitor_wfm   = None   # WaveformAiCtrl（多通道連續串流，即時監控用，v1.9）
+        self._instant_ai    = None   # InstantAiCtrl（即時 AI 輪詢，備援 / 相容用）
         self._di_ctrl       = None   # InstantDiCtrl（即時 DI）
         self._connected     = False
         self._simulation_mode = not DAQNAVI_AVAILABLE
@@ -122,6 +123,16 @@ class DAQController:
                 except Exception:
                     pass
                 self._instant_ai = None
+            if self._monitor_wfm:
+                try:
+                    self._monitor_wfm.stop()
+                except Exception:
+                    pass
+                try:
+                    self._monitor_wfm.dispose()
+                except Exception:
+                    pass
+                self._monitor_wfm = None
             if self._wfm_ctrl:
                 try:
                     self._wfm_ctrl.stop()
@@ -172,6 +183,89 @@ class DAQController:
         """取得 WaveformAiCtrl 實例（診斷用）"""
         return self._wfm_ctrl
 
+    # ─── 監控用 WaveformAiCtrl（多通道連續串流，v1.9）──────────────────────────
+
+    def get_monitor_wfm_ctrl(self):
+        """取得即時監控用 WaveformAiCtrl 實例（供 AIReader 使用）"""
+        return self._monitor_wfm
+
+    def create_monitor_wfm_ctrl(self):
+        """
+        建立即時監控用 WaveformAiCtrl（多通道連續串流，20kHz/通道）。
+
+        於監控啟動時呼叫。診斷模式中不可建立（AI 硬體由診斷 WaveformAiCtrl 獨占）。
+        會查詢並記錄硬體取樣率上限，供 AIReader clamp 使用。
+
+        Returns:
+            WaveformAiCtrl | None: 建立成功回傳實例；模擬模式或失敗回傳 None
+        """
+        if self._simulation_mode:
+            return None
+        if self._diag_mode:
+            print("[DAQ] 診斷模式中，無法建立監控 WaveformAiCtrl")
+            return None
+        if not self._connected:
+            print("[DAQ] 裝置未連線，無法建立監控 WaveformAiCtrl")
+            return None
+
+        # 已存在則直接回傳
+        if self._monitor_wfm is not None:
+            return self._monitor_wfm
+
+        try:
+            # 釋放 InstantAiCtrl，讓監控 WaveformAiCtrl 可獨占 AI 硬體
+            if self._instant_ai:
+                try:
+                    self._instant_ai.dispose()
+                except Exception:
+                    pass
+                self._instant_ai = None
+                print("[DAQ] InstantAiCtrl 已釋放（監控串流模式）")
+
+            self._monitor_wfm = WaveformAiCtrl(self.device_description)
+            if self._monitor_wfm is None:
+                raise RuntimeError("無法建立監控 WaveformAiCtrl")
+
+            # 查詢硬體取樣率上限（供 clamp_clock_rate 使用）
+            self._wfm_ctrl = self._monitor_wfm  # 暫借供 _query 使用
+            self._hw_max_clock_rate = self._query_hw_max_clock_rate()
+            self._wfm_ctrl = None
+
+            print(
+                f"[DAQ] 監控 WaveformAiCtrl 已建立 | "
+                f"硬體取樣率上限: {getattr(self, '_hw_max_clock_rate', 0):,.0f} Hz"
+            )
+            return self._monitor_wfm
+
+        except Exception as e:
+            print(f"[DAQ] 建立監控 WaveformAiCtrl 失敗: {e}")
+            self._monitor_wfm = None
+            return None
+
+    def release_monitor_wfm_ctrl(self):
+        """
+        釋放即時監控用 WaveformAiCtrl（於監控停止或進入診斷模式前呼叫）。
+
+        釋放後給硬體短暫時間完全釋放 AI 資源，避免後續控制器佔用失敗。
+        """
+        if self._monitor_wfm is None:
+            return
+        try:
+            try:
+                self._monitor_wfm.stop()
+            except Exception:
+                pass
+            try:
+                self._monitor_wfm.dispose()
+            except Exception:
+                pass
+            self._monitor_wfm = None
+            print("[DAQ] 監控 WaveformAiCtrl 已釋放")
+            time.sleep(0.15)
+        except Exception as e:
+            print(f"[DAQ] 釋放監控 WaveformAiCtrl 失敗: {e}")
+            self._monitor_wfm = None
+
     @property
     def is_diag_mode(self) -> bool:
         """是否正在診斷模式（InstantAI 已釋放）"""
@@ -198,7 +292,10 @@ class DAQController:
             return False
 
         try:
-            # 釋放 InstantAiCtrl（讓 WaveformAiCtrl 可獨占 AI 硬體）
+            # 釋放監控用 WaveformAiCtrl（若監控串流仍佔用 AI 硬體）
+            self.release_monitor_wfm_ctrl()
+
+            # 釋放 InstantAiCtrl（讓診斷 WaveformAiCtrl 可獨占 AI 硬體）
             if self._instant_ai:
                 try:
                     self._instant_ai.dispose()

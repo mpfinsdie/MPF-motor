@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         self._btn_monitor.setStyleSheet(BTN_MON_OFF_STYLE)
         self._btn_monitor.setEnabled(False)   # 連線後才啟用
         self._btn_monitor.setToolTip(
-            f"即時監控（InstantAI 輪詢，標示 {SAMPLING['ai_sample_rate']:,} Hz）\n"
+            f"即時監控（WaveformAI 多通道連續串流，{SAMPLING['ai_sample_rate']:,} Hz/通道）\n"
             "預設關閉，僅供初步觀察，不做 PASS/FAIL 判斷"
         )
         self._btn_monitor.clicked.connect(self._on_toggle_monitor)
@@ -553,7 +553,8 @@ class MainWindow(QMainWindow):
         self._btn_monitor.setText("📡 監控：開")
         self._btn_monitor.setStyleSheet(BTN_MON_ON_STYLE)
         self._status_bar.showMessage(
-            f"即時監控已啟動（{SAMPLING['ai_sample_rate']:,} Hz 標示）| 僅供初步觀察，診斷請用「高取樣診斷」"
+            f"即時監控已啟動（WaveformAI 連續串流 {SAMPLING['ai_sample_rate']:,} Hz/通道）"
+            f"| 僅供初步觀察，診斷請用「高取樣診斷」"
         )
         print("[MainWindow] 監控模式已啟動（手動）")
 

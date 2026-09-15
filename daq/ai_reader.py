@@ -1,19 +1,24 @@
 """
-類比輸入讀取模組（InstantAiCtrl 輪詢版）
-使用 InstantAiCtrl.readDataF64() 定時輪詢，穩定可靠
+類比輸入讀取模組（WaveformAiCtrl 多通道連續串流版，v1.9）
 
 架構：
-  真實硬體：InstantAiCtrl 輪詢執行緒
-    背景執行緒每 10ms 呼叫 readDataF64(start, count) → 取得涵蓋範圍通道即時電壓
-    → 從中取出所需通道 → 存入 deque → 觸發 UI callback
+  真實硬體：WaveformAiCtrl 多通道硬體 DMA 連續串流
+    conversion.channelStart/channelCount 涵蓋所有使用者 AI 通道（min~max 範圍），
+    conversion.clockRate = ai_sample_rate（每通道 20kHz），
+    record.sectionLength = monitor_chunk_size（每通道分段點數），sectionCount = 0（無限循環）。
+    背景執行緒每次 getDataF64 取回一段「交錯（interleaved）」資料，
+    解交錯後依實際通道編號存入各自 deque 並觸發 UI callback。
 
-  模擬模式：保留舊的輪詢執行緒（無硬體時 UI 測試用）
-    time.sleep 輪詢 → _simulate_ai() → deque
+  模擬模式：背景執行緒以相同節奏分段產生模擬波形資料（每通道 20kHz）。
 
 通道對應：
   由 config.channel_config.CHANNEL_CONFIG 動態提供，使用者可透過 UI
   「硬體通道設定」或直接編輯 config/channel_map.json 調整 AI 通道，
   不再固定為 AI0~4。呼叫 refresh_channels() 可於執行期套用新設定。
+
+效能對比（v1.8 → v1.9）：
+  舊版：InstantAiCtrl 逐次輪詢，實際約 100 Hz（受 OS 排程限制）
+  新版：WaveformAiCtrl 硬體連續串流，每通道實際 20,000 Hz
 """
 
 import time
@@ -29,16 +34,15 @@ from config.channel_config import CHANNEL_CONFIG
 
 class AIReader:
     """
-    類比輸入讀取器（InstantAiCtrl 輪詢版）
+    類比輸入讀取器（WaveformAiCtrl 多通道連續串流版）
 
     真實硬體模式：
-      - 背景執行緒每 10ms 呼叫 InstantAiCtrl.readDataF64(start, count)
-        （start~count 涵蓋所有使用者設定的 AI 通道）
-      - 取得涵蓋範圍電壓後取出所需通道存入 deque 並觸發 UI callback
-      - 穩定連續，不受 WaveformAI cycles 限制
+      - 建立監控用 WaveformAiCtrl，設定多通道 conversion 與 record 後啟動硬體串流
+      - 背景執行緒分段 getDataF64 取回交錯資料，解交錯分配至各通道 deque
+      - 每個通道實際以 ai_sample_rate（20kHz）硬體採樣
 
     模擬模式：
-      - 啟動背景執行緒以 ~100 Hz 產生模擬波形資料
+      - 啟動背景執行緒以相同節奏產生模擬波形資料（每通道 20kHz）
 
     通道對應由 CHANNEL_CONFIG 動態提供，可用 refresh_channels() 熱更新。
     """
@@ -49,7 +53,11 @@ class AIReader:
             daq_controller: DAQController 實例
         """
         self._daq         = daq_controller
-        self._buffer_size = SAMPLING["buffer_size"]
+        self._buffer_size  = SAMPLING["buffer_size"]
+        self._sample_rate  = SAMPLING["ai_sample_rate"]        # 每通道取樣率 (Hz)，20kHz
+        self._chunk_size   = SAMPLING["monitor_chunk_size"]    # 每通道每段點數，2000
+        self._section_len  = SAMPLING["section_length"]        # 每通道 section 長度
+        self._section_cnt  = SAMPLING["section_count"]
 
         # 執行緒控制
         self._running = False
@@ -69,15 +77,16 @@ class AIReader:
         依 CHANNEL_CONFIG 目前設定建立通道清單、緩衝區與讀取範圍。
 
         通道可能非連續（例如使用者設定 AI0,1,2,5,6），因此以 min~max
-        涵蓋範圍呼叫 readDataF64，再依實際通道編號取值。
+        涵蓋範圍設定 WaveformAiCtrl 的 channelStart/channelCount，
+        取回交錯資料後再依實際通道編號解交錯取值。
         """
         self._hall_chs    = [CHANNEL_CONFIG.hall_ai(s) for s in ("U", "V", "W")]
         self._encoder_chs = [CHANNEL_CONFIG.encoder_ai(s) for s in ("A", "B")]
         self._all_chs     = self._hall_chs + self._encoder_chs
 
-        # 讀取涵蓋範圍（含中間未使用的通道，一次讀取後再挑選）
-        self._read_start = min(self._all_chs)
-        self._read_count = max(self._all_chs) - self._read_start + 1
+        # 掃描涵蓋範圍（含中間未使用的通道，硬體連續掃描後再解交錯挑選）
+        self._scan_start = min(self._all_chs)
+        self._scan_count = max(self._all_chs) - self._scan_start + 1
 
         self._channel_names = CHANNEL_CONFIG.channel_names()
 
@@ -95,7 +104,7 @@ class AIReader:
         於執行期套用新的通道設定（使用者透過 UI 修改通道後呼叫）。
 
         會停止目前讀取（若正在執行）、重建通道結構，並在真實硬體模式下
-        重新設定量程後重啟輪詢。
+        重新以新通道範圍設定 WaveformAiCtrl 後重啟串流。
         """
         was_running = self._running
         if was_running:
@@ -133,7 +142,7 @@ class AIReader:
     # ─── 啟動 / 停止 ────────────────────────────────────────────────────────────
 
     def start(self):
-        """啟動 AI 讀取（真實硬體：InstantAI 輪詢；模擬：模擬輪詢）"""
+        """啟動 AI 讀取（真實硬體：WaveformAI 多通道串流；模擬：模擬串流）"""
         if self._running:
             return
         self._running = True
@@ -141,7 +150,7 @@ class AIReader:
         if self._daq.is_simulation:
             self._start_simulation()
         else:
-            self._start_instant_ai()
+            self._start_waveform_ai()
 
     def stop(self):
         """停止 AI 讀取"""
@@ -156,74 +165,123 @@ class AIReader:
         if self._daq.is_simulation:
             print("[AIReader] 模擬模式已停止")
         else:
-            print("[AIReader] InstantAI 輪詢已停止")
+            # 釋放監控用 WaveformAiCtrl（讓後續診斷 / InstantAI 可獨占硬體）
+            try:
+                self._daq.release_monitor_wfm_ctrl()
+            except Exception as e:
+                print(f"[AIReader] 釋放監控 WaveformAiCtrl 失敗: {e}")
+            print("[AIReader] WaveformAI 多通道串流已停止")
 
-    # ─── 真實硬體：InstantAiCtrl 輪詢 ───────────────────────────────────────────
+    # ─── 真實硬體：WaveformAiCtrl 多通道連續串流 ────────────────────────────────
 
-    def _start_instant_ai(self):
-        """啟動 InstantAI 輪詢執行緒"""
+    def _start_waveform_ai(self):
+        """建立並啟動監控用 WaveformAiCtrl 多通道連續串流"""
         try:
             from Automation.BDaq.BDaqApi import BioFailed
 
-            ai = self._daq.get_instant_ai_ctrl()
-            if ai is None:
-                raise RuntimeError("InstantAiCtrl 未初始化")
+            wfm = self._daq.create_monitor_wfm_ctrl()
+            if wfm is None:
+                raise RuntimeError("監控 WaveformAiCtrl 未建立")
 
             # ── 設定各通道量程（依 CHANNEL_CONFIG）────────────────────────────
-            # Hall 通道：hall 量程（預設 0~5V，Hall 3.3V 訊號）
             hall_vr = CHANNEL_CONFIG.value_range("hall")
             for ch in self._hall_chs:
-                ai.channels[ch].valueRange = hall_vr
-            # Encoder 通道：encoder 量程（預設 0~10V，Encoder 5V 訊號）
+                wfm.channels[ch].valueRange = hall_vr
             enc_vr = CHANNEL_CONFIG.value_range("encoder")
             for ch in self._encoder_chs:
-                ai.channels[ch].valueRange = enc_vr
+                wfm.channels[ch].valueRange = enc_vr
 
-            # ── 啟動輪詢執行緒 ────────────────────────────────────────────────
+            # ── 設定 conversion（多通道掃描）──────────────────────────────────
+            # clockRate 為每通道取樣率；clamp 確保不超過硬體上限
+            # 硬體總取樣率 = clockRate × channelCount，須在硬體總頻寬內
+            actual_rate = self._daq.clamp_clock_rate(float(self._sample_rate))
+            conv = wfm.conversion
+            conv.channelStart = self._scan_start
+            conv.channelCount = self._scan_count
+            conv.clockRate    = actual_rate
+            self._actual_rate = actual_rate
+
+            # ── 設定 record（環形緩衝，無限循環）──────────────────────────────
+            rec = wfm.record
+            rec.sectionLength = self._chunk_size   # 每通道每段點數
+            rec.sectionCount  = 0                  # 0 = 無限循環，不自動停止
+
+            # ── prepare & start ──────────────────────────────────────────────
+            err = wfm.prepare()
+            if BioFailed(err):
+                raise RuntimeError(f"監控 WaveformAiCtrl.prepare 失敗: {err}")
+
+            err = wfm.start()
+            if BioFailed(err):
+                raise RuntimeError(f"監控 WaveformAiCtrl.start 失敗: {err}")
+
+            # ── 啟動讀取執行緒 ────────────────────────────────────────────────
             self._thread = threading.Thread(
-                target=self._instant_ai_loop, daemon=True
+                target=self._waveform_ai_loop, daemon=True
             )
             self._thread.start()
 
             print(
-                f"[AIReader] InstantAI 輪詢已啟動 | "
+                f"[AIReader] WaveformAI 多通道串流已啟動 | "
                 f"通道: {self._all_chs} | "
-                f"讀取範圍: start={self._read_start}, count={self._read_count} | "
-                f"輪詢間隔: 10ms (100 Hz)"
+                f"掃描範圍: start={self._scan_start}, count={self._scan_count} | "
+                f"每通道取樣率: {actual_rate:,.0f} Hz | "
+                f"chunk: {self._chunk_size} 點/通道 "
+                f"({self._chunk_size / actual_rate * 1000:.1f}ms/段)"
             )
 
         except Exception as e:
-            print(f"[AIReader] InstantAI 啟動失敗: {e}")
+            print(f"[AIReader] WaveformAI 啟動失敗: {e}")
+            self._running = False
+            try:
+                self._daq.release_monitor_wfm_ctrl()
+            except Exception:
+                pass
             raise
 
-    def _instant_ai_loop(self):
+    def _waveform_ai_loop(self):
         """
-        InstantAI 輪詢執行緒
-        每 10ms 讀取一次涵蓋範圍通道電壓，取出所需通道存入 deque 並觸發 callback
+        WaveformAI 多通道串流讀取執行緒
+
+        每次 getDataF64 取回一段交錯（interleaved）資料，長度 =
+        chunk_size × scan_count，依 scan_count 解交錯後取出所需通道存入 deque。
         """
         from Automation.BDaq.BDaqApi import BioFailed
 
-        ai = self._daq.get_instant_ai_ctrl()
-        interval = 0.01  # 10ms = 100 Hz
+        wfm = self._daq.get_monitor_wfm_ctrl()
+        if wfm is None:
+            print("[AIReader] 讀取執行緒啟動失敗：WaveformAiCtrl 為 None")
+            self._running = False
+            return
+
+        total_count = self._chunk_size * self._scan_count
+        # timeout = chunk 採集時間 × 5 倍安全係數
+        chunk_duration_ms = self._chunk_size / self._actual_rate * 1000.0
+        timeout_ms = max(500, int(chunk_duration_ms * 5))
 
         while self._running:
-            t_start = time.time()
             try:
-                ret, data = ai.readDataF64(self._read_start, self._read_count)
+                err, returned, data, *_ = wfm.getDataF64(total_count, timeout_ms)
 
-                if BioFailed(ret) or not data:
-                    time.sleep(interval)
+                if BioFailed(err) or returned == 0 or not data:
                     continue
+
+                # 解交錯：data 為 [ch0,ch1,...,chN, ch0,ch1,...] 排列
+                # 完整掃描組數 = returned // scan_count
+                arr = np.asarray(data[:returned], dtype=np.float32)
+                groups = returned // self._scan_count
+                if groups == 0:
+                    continue
+                arr = arr[:groups * self._scan_count].reshape(groups, self._scan_count)
 
                 t_now = time.time()
                 with self._lock:
                     self._timestamps.append(t_now)
                     for ch in self._all_chs:
-                        # data 索引 = 實際通道 - 讀取起始通道
-                        col = ch - self._read_start
-                        val = float(data[col])
-                        self._buffers[ch].append(val)
-                        self._latest[ch] = val
+                        col = ch - self._scan_start        # 交錯欄位索引
+                        samples = arr[:, col]
+                        self._buffers[ch].extend(samples.tolist())
+                        self._latest[ch] = float(samples[-1])
 
                 if self._on_data_callback:
                     latest_snapshot = {ch: self._latest[ch] for ch in self._all_chs}
@@ -231,61 +289,82 @@ class AIReader:
 
             except Exception as e:
                 if self._running:
-                    print(f"[AIReader] InstantAI 讀取錯誤: {e}")
+                    print(f"[AIReader] WaveformAI 讀取錯誤: {e}")
+                    time.sleep(0.05)
 
-            # 精確控制輪詢間隔
-            elapsed = time.time() - t_start
-            sleep_time = interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-
-    # ─── 模擬模式：輪詢執行緒 ───────────────────────────────────────────────────
+    # ─── 模擬模式：多通道串流 ───────────────────────────────────────────────────
 
     def _start_simulation(self):
-        """啟動模擬模式背景執行緒（約 100 Hz 產生假資料）"""
+        """啟動模擬模式背景執行緒（每通道 20kHz，分段產生假資料）"""
+        self._actual_rate = float(self._sample_rate)
         self._thread = threading.Thread(target=self._sim_loop, daemon=True)
         self._thread.start()
-        print("[AIReader] 模擬模式已啟動（~100 Hz）")
+        print(
+            f"[AIReader] 模擬模式已啟動（每通道 {self._sample_rate:,} Hz，"
+            f"{self._chunk_size} 點/段）"
+        )
 
     def _sim_loop(self):
-        """模擬模式讀取迴圈（每 10ms 產生一筆資料）"""
-        interval = 0.01  # 100 Hz
-        while self._running:
-            try:
-                t = time.time()
-                readings = {ch: self._simulate_ai(ch, t) for ch in self._all_chs}
+        """
+        模擬模式讀取迴圈（每段產生 chunk_size 點/通道，節奏對齊硬體）
+        """
+        chunk_duration = self._chunk_size / self._sample_rate  # 0.1 秒/段
+        t_base = time.time()
+        sample_idx = 0
 
+        while self._running:
+            # 等待一段時間模擬硬體採樣節奏
+            time.sleep(chunk_duration)
+            if not self._running:
+                break
+
+            try:
+                # 產生本段每通道 chunk_size 點的時間軸
+                t_start = sample_idx / self._sample_rate
+                t_arr = t_start + np.arange(self._chunk_size) / self._sample_rate
+                sample_idx += self._chunk_size
+
+                t_now = time.time()
                 with self._lock:
-                    self._timestamps.append(t)
-                    for ch, val in readings.items():
-                        self._buffers[ch].append(val)
-                        self._latest[ch] = val
+                    self._timestamps.append(t_now)
+                    for ch in self._all_chs:
+                        samples = self._simulate_ai_chunk(ch, t_arr)
+                        self._buffers[ch].extend(samples.tolist())
+                        self._latest[ch] = float(samples[-1])
 
                 if self._on_data_callback:
-                    self._on_data_callback(readings)
+                    snapshot = {ch: self._latest[ch] for ch in self._all_chs}
+                    self._on_data_callback(snapshot)
 
             except Exception as e:
                 print(f"[AIReader] 模擬讀取錯誤: {e}")
 
-            time.sleep(interval)
+    def _simulate_ai_chunk(self, channel: int, t_arr: np.ndarray) -> np.ndarray:
+        """
+        向量化產生一段模擬 AI 電壓（用於無硬體時測試）
+
+        依通道所屬類型（Hall / Encoder）產生對應模擬方波，
+        不再依賴固定通道編號，支援使用者自訂通道。
+        """
+        # Hall 通道：3.3V 方波，三相相差 120 度，基頻 2 Hz
+        if channel in self._hall_chs:
+            phase_idx = self._hall_chs.index(channel)
+            wave = np.sin(2 * math.pi * 2 * t_arr + phase_idx * 2.094)
+            return np.where(wave > 0, 3.3, 0.0).astype(np.float32)
+        # Encoder 通道：5V 方波，A/B 相差 90 度，基頻 10 Hz
+        if channel in self._encoder_chs:
+            enc_idx = self._encoder_chs.index(channel)
+            phase = 0.0 if enc_idx == 0 else -math.pi / 2
+            wave = np.sin(2 * math.pi * 10 * t_arr + phase)
+            return np.where(wave > 0, 5.0, 0.0).astype(np.float32)
+        return np.zeros(len(t_arr), dtype=np.float32)
 
     def _simulate_ai(self, channel: int, t: float) -> float:
         """
-        模擬 AI 電壓讀取（用於無硬體時測試）
-
-        依通道所屬類型（Hall / Encoder）產生對應模擬波形，
-        不再依賴固定通道編號，支援使用者自訂通道。
+        模擬單一取樣點（相容保留，供其他模組呼叫）
         """
-        # Hall 通道：3.3V 方波，三相相差 120 度
-        if channel in self._hall_chs:
-            phase_idx = self._hall_chs.index(channel)
-            return 3.3 if math.sin(2 * math.pi * 2 * t + phase_idx * 2.094) > 0 else 0.0
-        # Encoder 通道：5V 方波，A/B 相差 90 度
-        elif channel in self._encoder_chs:
-            enc_idx = self._encoder_chs.index(channel)
-            phase = 0.0 if enc_idx == 0 else -math.pi / 2
-            return 5.0 if math.sin(2 * math.pi * 10 * t + phase) > 0 else 0.0
-        return 0.0
+        arr = self._simulate_ai_chunk(channel, np.array([t], dtype=np.float64))
+        return float(arr[0])
 
     # ─── 資料查詢方法 ────────────────────────────────────────────────────────────
 
@@ -323,7 +402,7 @@ class AIReader:
             return np.array(list(self._buffers[channel]))
 
     def get_timestamps(self) -> np.ndarray:
-        """取得時間戳記陣列"""
+        """取得時間戳記陣列（每段一個，非每點）"""
         with self._lock:
             return np.array(list(self._timestamps))
 
