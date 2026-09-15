@@ -1,16 +1,21 @@
 """
 量測參數設置對話框
-操作員在開始診斷前輸入馬達序號、操作員名稱及量測參數
+
+操作員在此設定量測參數（Hall 週期/轉、Encoder 解析度/PPR、Hall/Encoder 電壓閾值、
+比值容差），並可將設定存成具名的「馬達型號 profile」，方便為不同馬達切換套用。
+
+（測試物件的馬達序號 / 操作員已移至獨立的 ObjectInfoDialog）
 """
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QPushButton,
-    QGroupBox, QFrame
+    QGroupBox, QFrame, QComboBox, QMessageBox, QInputDialog
 )
 from PyQt5.QtCore import Qt
 
 from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, DIAGNOSTIC
+from config.motor_profiles import MOTOR_PROFILES
 
 
 DIALOG_STYLE = """
@@ -49,6 +54,24 @@ DIALOG_STYLE = """
         border-radius: 4px;
         padding: 4px 6px;
         font-size: 12px;
+    }
+    QComboBox {
+        background-color: #2A2A2A;
+        color: #FFFFFF;
+        border: 1px solid #555555;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 12px;
+        min-width: 160px;
+    }
+    QComboBox:focus {
+        border: 1px solid #4AABFF;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #2A2A2A;
+        color: #FFFFFF;
+        selection-background-color: #2D5A8E;
+        border: 1px solid #555555;
     }
     QGroupBox {
         color: #AAAAAA;
@@ -90,6 +113,24 @@ DIALOG_STYLE = """
     QPushButton#btn_cancel:hover {
         background-color: #7A4A4A;
     }
+    QPushButton#btn_profile {
+        background-color: #444444;
+        font-size: 11px;
+        padding: 5px 12px;
+        min-width: 60px;
+    }
+    QPushButton#btn_profile:hover {
+        background-color: #555555;
+    }
+    QPushButton#btn_profile_del {
+        background-color: #6A3A3A;
+        font-size: 11px;
+        padding: 5px 12px;
+        min-width: 60px;
+    }
+    QPushButton#btn_profile_del:hover {
+        background-color: #8A4A4A;
+    }
     QFrame#separator {
         background-color: #444444;
     }
@@ -98,15 +139,13 @@ DIALOG_STYLE = """
 
 class SessionStartDialog(QDialog):
     """
-    量測參數設置對話框
+    量測參數設置對話框（含馬達型號 profile 管理）
 
     使用方式：
         dlg = SessionStartDialog(parent=self)
         if dlg.exec_() == QDialog.Accepted:
             info = dlg.get_session_info()
-            # info = {"serial_no": str, "operator": str,
-            #         "ppr": int, "hall_vh_min": float, "hall_vl_max": float,
-            #         "enc_vh_min": float, "enc_vl_max": float}
+            # info 包含各量測參數，以及最終選用的 profile 名稱
     """
 
     def __init__(self, parent=None, default_duration_min: int = None):
@@ -114,10 +153,16 @@ class SessionStartDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("參數設置")
         self.setModal(True)
-        self.setFixedWidth(420)
+        self.setFixedWidth(440)
         self.setStyleSheet(DIALOG_STYLE)
 
+        # 目前選用的 profile 名稱（用於套用後回報主視窗記錄 active）
+        self._current_profile_name = MOTOR_PROFILES.get_active_name()
+
         self._setup_ui()
+
+        # 依 active profile 帶入初始欄位值
+        self._load_profile_into_fields(self._current_profile_name)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -135,23 +180,48 @@ class SessionStartDialog(QDialog):
         sep.setFixedHeight(1)
         layout.addWidget(sep)
 
-        # ── 測試物件資訊 ──────────────────────────────────────────────────────
-        info_group = QGroupBox("測試物件資訊")
-        form = QFormLayout(info_group)
-        form.setSpacing(10)
-        form.setLabelAlignment(Qt.AlignRight)
+        # ── 馬達型號 Profile ──────────────────────────────────────────────────
+        profile_group = QGroupBox("馬達型號設定檔（Profile）")
+        profile_layout = QVBoxLayout(profile_group)
+        profile_layout.setSpacing(8)
 
-        self._serial_edit = QLineEdit()
-        self._serial_edit.setPlaceholderText("例：MTR-2026-001（可留空）")
-        self._serial_edit.setMaxLength(64)
-        form.addRow("馬達序號：", self._serial_edit)
+        # Profile 下拉選單列
+        combo_row = QHBoxLayout()
+        combo_row.setSpacing(8)
+        combo_row.addWidget(QLabel("套用設定："))
 
-        self._operator_edit = QLineEdit()
-        self._operator_edit.setPlaceholderText("操作員姓名（可留空）")
-        self._operator_edit.setMaxLength(32)
-        form.addRow("操作員：", self._operator_edit)
+        self._profile_combo = QComboBox()
+        self._refresh_profile_combo()
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        combo_row.addWidget(self._profile_combo, stretch=1)
+        profile_layout.addLayout(combo_row)
 
-        layout.addWidget(info_group)
+        # Profile 操作按鈕列（儲存 / 另存 / 刪除）
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self._btn_save_profile = QPushButton("💾 儲存")
+        self._btn_save_profile.setObjectName("btn_profile")
+        self._btn_save_profile.setToolTip("將目前欄位值存回目前選取的 profile")
+        self._btn_save_profile.clicked.connect(self._on_save_profile)
+        btn_row.addWidget(self._btn_save_profile)
+
+        self._btn_saveas_profile = QPushButton("➕ 另存新檔")
+        self._btn_saveas_profile.setObjectName("btn_profile")
+        self._btn_saveas_profile.setToolTip("將目前欄位值另存成新的具名 profile")
+        self._btn_saveas_profile.clicked.connect(self._on_saveas_profile)
+        btn_row.addWidget(self._btn_saveas_profile)
+
+        self._btn_del_profile = QPushButton("🗑 刪除")
+        self._btn_del_profile.setObjectName("btn_profile_del")
+        self._btn_del_profile.setToolTip("刪除目前選取的 profile（至少保留一組）")
+        self._btn_del_profile.clicked.connect(self._on_delete_profile)
+        btn_row.addWidget(self._btn_del_profile)
+
+        btn_row.addStretch()
+        profile_layout.addLayout(btn_row)
+
+        layout.addWidget(profile_group)
 
         # ── 量測參數設定 ───────────────────────────────────────────────────────
         param_group = QGroupBox("量測參數設定")
@@ -267,8 +337,9 @@ class SessionStartDialog(QDialog):
 
         # ── 提示文字 ──────────────────────────────────────────────────────────
         hint = QLabel(
-            "💡 提示：設定完成後按「套用參數」，\n"
-            "   再按「高取樣診斷」開始高速採樣檢測"
+            "💡 提示：可用上方 profile 切換不同馬達設定；\n"
+            "   修改欄位後按「💾 儲存」或「➕ 另存新檔」保留設定，\n"
+            "   按「⚙ 套用參數」立即生效（並記為預設載入的 profile）。"
         )
         hint.setObjectName("lbl_hint")
         hint.setWordWrap(True)
@@ -288,13 +359,10 @@ class SessionStartDialog(QDialog):
         btn_apply = QPushButton("⚙  套用參數")
         btn_apply.setObjectName("btn_apply")
         btn_apply.setDefault(True)
-        btn_apply.clicked.connect(self.accept)
+        btn_apply.clicked.connect(self._on_apply)
         btn_layout.addWidget(btn_apply)
 
         layout.addLayout(btn_layout)
-
-        # 讓序號欄位自動取得焦點
-        self._serial_edit.setFocus()
 
     # ─── 公開介面 ──────────────────────────────────────────────────────────────
 
@@ -303,8 +371,7 @@ class SessionStartDialog(QDialog):
         取得使用者輸入的參數資訊
         Returns:
             dict: {
-                "serial_no":           str,   馬達序號
-                "operator":            str,   操作員
+                "profile_name":        str,   最終選用的 profile 名稱
                 "hall_pulses_per_rev": int,   Hall 每相每轉週期數
                 "ppr":                 int,   Encoder 每相每轉脈波數
                 "resolution_bits":     int,   Encoder 解析度位元數
@@ -315,9 +382,143 @@ class SessionStartDialog(QDialog):
                 "ratio_tolerance":     float, 比值交叉驗證容差（比例）
             }
         """
+        info = self._collect_fields()
+        info["profile_name"] = self._current_profile_name
+        return info
+
+    # ─── Profile 管理 ──────────────────────────────────────────────────────────
+
+    def _refresh_profile_combo(self, select_name: str = None):
+        """
+        重建 profile 下拉選單內容。
+
+        Args:
+            select_name: 重建後要選取的 profile 名稱（None = 使用目前 active）
+        """
+        target = select_name or self._current_profile_name
+        # 暫時阻斷 currentIndexChanged 訊號，避免重建時誤觸切換帶入
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        names = MOTOR_PROFILES.list_profiles()
+        self._profile_combo.addItems(names)
+        if target in names:
+            self._profile_combo.setCurrentText(target)
+        self._profile_combo.blockSignals(False)
+
+    def _on_profile_changed(self, _index: int):
+        """使用者從下拉選單切換 profile → 帶入該 profile 的欄位值"""
+        name = self._profile_combo.currentText()
+        if not name:
+            return
+        self._current_profile_name = name
+        self._load_profile_into_fields(name)
+
+    def _load_profile_into_fields(self, name: str):
+        """將指定 profile 的參數帶入各輸入欄位"""
+        params = MOTOR_PROFILES.get_profile(name)
+        # 阻斷 valueChanged（避免 enc_bits 變更觸發 PPR 自動覆蓋）
+        self._enc_bits_spin.blockSignals(True)
+        self._hall_ppr_spin.setValue(int(params["hall_pulses_per_rev"]))
+        self._hall_vh_spin.setValue(float(params["hall_vh_min"]))
+        self._hall_vl_spin.setValue(float(params["hall_vl_max"]))
+        self._enc_bits_spin.setValue(int(params["resolution_bits"]))
+        self._ppr_spin.setValue(int(params["ppr"]))
+        self._enc_vh_spin.setValue(float(params["enc_vh_min"]))
+        self._enc_vl_spin.setValue(float(params["enc_vl_max"]))
+        self._ratio_tol_spin.setValue(float(params["ratio_tolerance"]))
+        self._enc_bits_spin.blockSignals(False)
+        self._update_ratio_hint()
+
+    def _on_save_profile(self):
+        """將目前欄位值存回目前選取的 profile"""
+        name = self._current_profile_name
+        params = self._collect_fields()
+        if MOTOR_PROFILES.save_profile(name, params, set_active=True):
+            self._refresh_profile_combo(select_name=name)
+            QMessageBox.information(
+                self, "已儲存",
+                f"已將目前參數存回 profile：\n「{name}」"
+            )
+        else:
+            QMessageBox.warning(self, "儲存失敗", "無法儲存 profile，請檢查名稱是否有效。")
+
+    def _on_saveas_profile(self):
+        """將目前欄位值另存成新的具名 profile"""
+        name, ok = QInputDialog.getText(
+            self, "另存新檔", "請輸入新的馬達型號 profile 名稱："
+        )
+        if not ok:
+            return
+        name = (name or "").strip()
+        if not name:
+            QMessageBox.warning(self, "名稱無效", "profile 名稱不可為空白。")
+            return
+        # 若同名詢問是否覆蓋
+        if MOTOR_PROFILES.has_profile(name):
+            reply = QMessageBox.question(
+                self, "名稱已存在",
+                f"profile「{name}」已存在，是否覆蓋？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        params = self._collect_fields()
+        if MOTOR_PROFILES.save_profile(name, params, set_active=True):
+            self._current_profile_name = name
+            self._refresh_profile_combo(select_name=name)
+            QMessageBox.information(
+                self, "已另存",
+                f"已新增 profile：\n「{name}」"
+            )
+        else:
+            QMessageBox.warning(self, "儲存失敗", "無法建立 profile，請檢查名稱是否有效。")
+
+    def _on_delete_profile(self):
+        """刪除目前選取的 profile"""
+        name = self._current_profile_name
+        if len(MOTOR_PROFILES.list_profiles()) <= 1:
+            QMessageBox.warning(
+                self, "無法刪除",
+                "至少需保留一組 profile，無法刪除最後一組。"
+            )
+            return
+        reply = QMessageBox.question(
+            self, "確認刪除",
+            f"確定要刪除 profile「{name}」？\n此操作無法復原。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if MOTOR_PROFILES.delete_profile(name):
+            # 切換到剩餘的 active profile
+            self._current_profile_name = MOTOR_PROFILES.get_active_name()
+            self._refresh_profile_combo(select_name=self._current_profile_name)
+            self._load_profile_into_fields(self._current_profile_name)
+            QMessageBox.information(
+                self, "已刪除",
+                f"已刪除 profile「{name}」，\n"
+                f"目前套用：「{self._current_profile_name}」"
+            )
+        else:
+            QMessageBox.warning(self, "刪除失敗", "無法刪除該 profile。")
+
+    def _on_apply(self):
+        """按「套用參數」：將目前選取 profile 設為 active 並關閉對話框"""
+        # 確保選取的 profile 記為 active（供下次啟動自動載入）
+        name = self._current_profile_name
+        if MOTOR_PROFILES.has_profile(name):
+            MOTOR_PROFILES.set_active(name)
+        self.accept()
+
+    # ─── 私有輔助方法 ──────────────────────────────────────────────────────────
+
+    def _collect_fields(self) -> dict:
+        """從各輸入欄位收集參數（不含 profile 名稱）"""
         return {
-            "serial_no":           self._serial_edit.text().strip(),
-            "operator":            self._operator_edit.text().strip(),
             "hall_pulses_per_rev": self._hall_ppr_spin.value(),
             "ppr":                 self._ppr_spin.value(),
             "resolution_bits":     self._enc_bits_spin.value(),
@@ -327,8 +528,6 @@ class SessionStartDialog(QDialog):
             "enc_vl_max":          self._enc_vl_spin.value(),
             "ratio_tolerance":     self._ratio_tol_spin.value(),
         }
-
-    # ─── 私有輔助方法 ──────────────────────────────────────────────────────────
 
     def _on_enc_bits_changed(self, bits: int):
         """

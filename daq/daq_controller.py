@@ -25,6 +25,7 @@ AI 取樣架構（WaveformAiCtrl）：
 
 import sys
 import os
+import time
 
 # 嘗試匯入 DAQNavi SDK（Automation package）
 try:
@@ -144,7 +145,27 @@ class DAQController:
             print(f"[警告] 釋放資源時發生錯誤: {e}")
 
     def get_instant_ai_ctrl(self):
-        """取得 InstantAiCtrl 實例（供 AIReader 使用）"""
+        """
+        取得 InstantAiCtrl 實例（供 AIReader 使用）。
+
+        採 lazy 初始化：離開診斷模式後 _instant_ai 會被設為 None，
+        待監控模式首次取用時才在此重新建立。如此可確保 WaveformAiCtrl
+        已完全釋放、AI 硬體資源不再被佔用後，InstantAiCtrl 才獨占硬體，
+        避免「診斷後監控無訊號」的資源競用問題。
+        """
+        if self._simulation_mode:
+            return None
+        # 診斷模式中 InstantAI 已釋放，不應被取用
+        if self._diag_mode:
+            return None
+        # 尚未建立（或剛離開診斷模式）→ 於此延遲建立
+        if self._instant_ai is None and self._connected:
+            try:
+                self._instant_ai = InstantAiCtrl(self.device_description)
+                print("[DAQ] InstantAiCtrl 已建立（lazy 初始化）")
+            except Exception as e:
+                print(f"[DAQ] InstantAiCtrl 建立失敗: {e}")
+                self._instant_ai = None
         return self._instant_ai
 
     def get_wfm_ai_ctrl(self):
@@ -285,14 +306,16 @@ class DAQController:
                     pass
                 self._wfm_ctrl = None
                 print("[DAQ] WaveformAiCtrl 已釋放")
+                # 給硬體一點時間完全釋放 AI 資源，避免後續 InstantAI 佔用失敗
+                time.sleep(0.15)
 
-            # 重建 InstantAiCtrl
-            self._instant_ai = InstantAiCtrl(self.device_description)
-            if self._instant_ai is None:
-                raise RuntimeError("無法重建 InstantAiCtrl")
-
+            # 不在此立即重建 InstantAiCtrl。
+            # 設為 None，待監控模式首次呼叫 get_instant_ai_ctrl() 時再 lazy 建立，
+            # 確保 WaveformAiCtrl 已完全 dispose、AI 硬體資源釋放後才獨占硬體，
+            # 避免「診斷後監控無訊號」的資源競用問題。
+            self._instant_ai = None
             self._diag_mode = False
-            print("[DAQ] InstantAiCtrl 已重建，離開診斷模式")
+            print("[DAQ] 離開診斷模式（InstantAiCtrl 將於監控啟動時 lazy 建立）")
             return True
 
         except Exception as e:

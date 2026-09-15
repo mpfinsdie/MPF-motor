@@ -1,0 +1,15 @@
+{
+  "active_profile": "預設",
+  "profiles": {
+    "預設": {
+      "hall_pulses_per_rev": 90,
+      "hall_vh_min": 2.0,
+      "hall_vl_max": 0.8,
+      "resolution_bits": 11,
+      "ppr": 512,
+      "enc_vh_min": 3.5,
+      "enc_vl_max": 1.5,
+      "ratio_tolerance": 0.15
+    }
+  }
+}

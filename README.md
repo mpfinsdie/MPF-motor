@@ -218,8 +218,8 @@ python main.py
 | 按鈕 | 說明 |
 |------|------|
 | **📡 監控開關** | 切換 10 kHz 即時監控（AI/DI 輪詢）開/關；連線後預設關閉 |
-| **▶ 開始檢測** | 開啟場次設定對話框，輸入序號、設定參數後開始計時 |
-| **⏹ 提前停止** | 提前結束檢測並儲存目前統計結果 |
+| **🏷 測試物件** | 開啟測試物件對話框，輸入馬達序號、操作員（記錄於診斷場次） |
+| **⚙ 參數設置** | 開啟量測參數對話框，設定 Hall/Encoder 規格與電壓閾值；可存成馬達型號 profile 切換套用 |
 | **🔬 高取樣診斷** | 啟動高取樣率診斷模式（暫停監控，逐 CH 200kHz 採樣，完成後自動分析 PASS/FAIL） |
 | **⏹ 結束診斷** | 提早結束診斷，已採資料仍會儲存並分析 |
 | **↺ 重置計數** | 重置 Encoder 計數器 |
@@ -229,24 +229,63 @@ python main.py
 | **🗄 DB 路徑** | 變更 SQLite 資料庫儲存路徑 |
 | **🔌 重新連線** | 重新連線 USB-4716 |
 
-### 開始檢測對話框
+### 「🏷 測試物件」對話框
 
-點擊「▶ 開始檢測」後彈出對話框，可設定以下項目：
+點擊「🏷 測試物件」後彈出對話框，輸入本次測試物件資訊（與量測參數分離）：
 
-**測試物件資訊**
 - **馬達序號**：可留空
 - **操作員**：可留空
 
-**測試設定**
-- **測試時長**：1 ~ 60 分鐘（預設 5 分鐘）
+> 序號與操作員會記錄於後續建立的診斷場次；再次開啟會自動帶入上次輸入的值。
 
-**量測參數設定**（每次測試前確認）
+### 「⚙ 參數設置」對話框（含馬達型號 Profile）
+
+點擊「⚙ 參數設置」後彈出對話框，可設定量測參數並管理多組具名的「馬達型號 profile」，
+讓不同馬達的設定可存檔重用，下次開啟自動載入上次套用的 profile，不需每次重設。
+
+**馬達型號設定檔（Profile）**
+- **套用設定（下拉選單）**：切換不同馬達的 profile，選取後欄位值即時帶入
+- **💾 儲存**：將目前欄位值存回目前選取的 profile
+- **➕ 另存新檔**：輸入新名稱，將目前欄位值另存成新的 profile
+- **🗑 刪除**：刪除目前選取的 profile（至少保留一組）
+
+**量測參數設定**
 - **Hall 週期/轉**：Hall Sensor 每相每轉產生的 H-L 週期數（預設 90，依實際馬達規格修改）
 - **Encoder 解析度**：Encoder 解析度位元數（預設 11 bits = 2048 counts/轉，自動帶出 PPR）
 - **Encoder PPR**：每相每轉脈波數（預設 512 = 2^11 / 4，可手動覆蓋）
 - **比值容差**：Hall/Encoder 脈波比值交叉驗證容差（預設 ±15%）
 - **Hall VH_min / VL_max**：Hall Sensor 電壓閾值
 - **Encoder VH_min / VL_max**：Encoder 電壓閾值
+
+> 按「⚙ 套用參數」會立即生效，並將目前選取的 profile 記為預設載入項；
+> 設定持久化於 `config/motor_profiles.json`，下次啟動自動載入 active profile。
+
+**`config/motor_profiles.json` 結構**
+
+```json
+{
+  "active_profile": "預設",
+  "profiles": {
+    "預設": {
+      "hall_pulses_per_rev": 90,
+      "hall_vh_min": 2.0,
+      "hall_vl_max": 0.8,
+      "resolution_bits": 11,
+      "ppr": 512,
+      "enc_vh_min": 3.5,
+      "enc_vl_max": 1.5,
+      "ratio_tolerance": 0.15
+    }
+  }
+}
+```
+
+| 欄位 | 說明 |
+|------|------|
+| `active_profile` | 目前套用（下次啟動自動載入）的 profile 名稱 |
+| `profiles.<名稱>` | 具名的馬達型號量測參數；可有多組，供不同馬達切換套用 |
+
+> **相容性**：檔案不存在時自動產生預設檔；載入時缺漏欄位自動以預設值補齊，`active_profile` 不存在則退回第一組 profile。
 
 ### 高取樣率診斷流程
 
@@ -321,7 +360,9 @@ MPF-motor/
 │   ├── __init__.py
 │   ├── thresholds.py              # 電壓閾值、取樣設定、資料庫路徑、診斷設定（動態套用通道對應）
 │   ├── channel_config.py          # 硬體通道對應中央設定（JSON 載入/儲存 + ValueRange 轉換）（v1.8 新增）
-│   └── channel_map.json           # 使用者通道對應設定檔（自動建立/持久化）（v1.8 新增）
+│   ├── channel_map.json           # 使用者通道對應設定檔（自動建立/持久化）（v1.8 新增）
+│   ├── motor_profiles.py          # 馬達型號量測參數 profile 管理（JSON 多組具名設定，持久化）
+│   └── motor_profiles.json        # 使用者馬達型號量測參數設定檔（自動建立/持久化）
 │
 ├── daq/
 │   ├── __init__.py
@@ -348,7 +389,8 @@ MPF-motor/
 │   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
 │   ├── result_panel.py            # 即時觀察面板（10 kHz 監控，僅顯示電壓/準位，無 PASS/FAIL）
-│   ├── session_dialog.py          # 場次啟動對話框（v1.1 新增）
+│   ├── session_dialog.py          # 量測參數設置對話框（含馬達型號 profile 管理）
+│   ├── object_info_dialog.py      # 測試物件資訊對話框（馬達序號 / 操作員）
 │   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
 │   └── history_viewer.py          # 歷史查詢視窗（含診斷場次識別）
 │

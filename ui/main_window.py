@@ -36,6 +36,7 @@ from config.thresholds import (
     refresh_channel_map,
 )
 from config.channel_config import CHANNEL_CONFIG
+from config.motor_profiles import MOTOR_PROFILES
 from daq.daq_controller import DAQController
 from daq.ai_reader import AIReader
 from daq.di_reader import DIReader
@@ -47,6 +48,7 @@ from ui.waveform_widget import WaveformWidget
 from ui.diagnostic_widget import DiagnosticWidget
 from ui.result_panel import ResultPanel
 from ui.session_dialog import SessionStartDialog
+from ui.object_info_dialog import ObjectInfoDialog
 from ui.channel_config_dialog import ChannelConfigDialog
 from ui.history_viewer import HistoryViewer
 from report.report_generator import ReportGenerator
@@ -186,6 +188,9 @@ class MainWindow(QMainWindow):
         self._setup_timer()
         self._setup_status_bar()
 
+        # 啟動時載入上次使用的量測參數 profile 並套用（下次開啟不需重設）
+        self._load_active_profile()
+
         # 嘗試連線（連線成功後自動進入監控模式）
         self._connect_device()
 
@@ -272,11 +277,18 @@ class MainWindow(QMainWindow):
         self._btn_monitor.clicked.connect(self._on_toggle_monitor)
         layout.addWidget(self._btn_monitor)
 
+        # 測試物件資訊（連線後可用，輸入馬達序號/操作員）
+        self._btn_object = QPushButton("🏷 測試物件")
+        self._btn_object.setEnabled(False)
+        self._btn_object.setToolTip("輸入測試物件的馬達序號與操作員（記錄於診斷場次）")
+        self._btn_object.clicked.connect(self._on_open_object_info)
+        layout.addWidget(self._btn_object)
+
         # 參數設置（連線後可用，不需監控開啟）
         self._btn_start = QPushButton("⚙ 參數設置")
         self._btn_start.setStyleSheet(BTN_START_STYLE)
         self._btn_start.setEnabled(False)
-        self._btn_start.setToolTip("設定量測參數（PPR、Hall/Encoder 閾值）及馬達序號/操作員")
+        self._btn_start.setToolTip("設定量測參數（PPR、Hall/Encoder 閾值），可存成馬達型號 profile 切換套用")
         self._btn_start.clicked.connect(self._on_open_param_settings)
         layout.addWidget(self._btn_start)
 
@@ -434,8 +446,9 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(
                 f"裝置已連線: {mode} | 監控預設關閉，按「監控：關」啟動即時觀察，或直接按「高取樣診斷」"
             )
-            # 連線後啟用監控開關、開始檢測、高取樣診斷按鈕
+            # 連線後啟用監控開關、測試物件、參數設置、高取樣診斷按鈕
             self._btn_monitor.setEnabled(True)
+            self._btn_object.setEnabled(True)
             self._btn_start.setEnabled(True)
             self._btn_diag.setEnabled(True)
 
@@ -461,6 +474,7 @@ class MainWindow(QMainWindow):
                 self._status_bar.showMessage("⚠ 模擬模式 | 監控預設關閉，按「監控：關」啟動即時觀察")
                 print("[MainWindow] 使用者選擇切換至模擬模式")
                 self._btn_monitor.setEnabled(True)
+                self._btn_object.setEnabled(True)
                 self._btn_start.setEnabled(True)
                 self._btn_diag.setEnabled(True)
             else:
@@ -469,6 +483,7 @@ class MainWindow(QMainWindow):
                 self._device_status_lbl.setStyleSheet("color: #FF4444; font-size: 12px;")
                 self._status_bar.showMessage("裝置連線失敗，請檢查 USB-4716 連接後重新連線")
                 self._btn_monitor.setEnabled(False)
+                self._btn_object.setEnabled(False)
                 self._btn_start.setEnabled(False)
                 self._btn_diag.setEnabled(False)
 
@@ -483,9 +498,30 @@ class MainWindow(QMainWindow):
         """啟動監控模式：持續讀取 AI/DI，顯示即時波形（手動啟動）"""
         if self._is_monitoring:
             return
+        # 啟動讀取器（若硬體資源尚未就緒可能拋例外，需正確還原狀態）
+        try:
+            self._ai_reader.start()
+            self._di_reader.start()
+        except Exception as e:
+            # 啟動失敗 → 還原狀態，避免按鈕顯示「開」但實際無資料
+            print(f"[MainWindow] 啟動監控失敗: {e}")
+            try:
+                self._ai_reader.stop()
+                self._di_reader.stop()
+            except Exception:
+                pass
+            self._is_monitoring = False
+            self._btn_monitor.setText("📡 監控：關")
+            self._btn_monitor.setStyleSheet(BTN_MON_OFF_STYLE)
+            self._status_bar.showMessage(f"⚠ 啟動監控失敗：{e}（請重新連線後再試）")
+            QMessageBox.warning(
+                self, "監控啟動失敗",
+                f"無法啟動即時監控：\n{e}\n\n"
+                f"若剛結束高取樣診斷，請稍候再試或按「重新連線」。"
+            )
+            return
+
         self._is_monitoring = True
-        self._ai_reader.start()
-        self._di_reader.start()
         self._update_timer.start()
         # 更新監控按鈕狀態
         self._btn_monitor.setText("📡 監控：開")
@@ -574,6 +610,7 @@ class MainWindow(QMainWindow):
         # ── 6. 更新按鈕狀態 ───────────────────────────────────────────────────
         self._btn_diag.setEnabled(False)
         self._btn_diag_stop.setEnabled(True)
+        self._btn_object.setEnabled(False)
         self._btn_start.setEnabled(False)
         self._btn_monitor.setEnabled(False)   # 診斷中禁用監控開關
 
@@ -754,6 +791,7 @@ class MainWindow(QMainWindow):
         # ── 5. 恢復按鈕狀態（監控維持關閉，讓使用者自行決定是否開啟）────────
         self._btn_diag_stop.setEnabled(False)
         self._btn_monitor.setEnabled(True)
+        self._btn_object.setEnabled(True)
         self._btn_start.setEnabled(True)
         self._btn_diag.setEnabled(True)
 
@@ -861,22 +899,39 @@ class MainWindow(QMainWindow):
 
         dlg.exec_()
 
-    # ─── 參數設置事件 ──────────────────────────────────────────────────────────
+    # ─── 測試物件資訊事件 ──────────────────────────────────────────────────────
 
-    def _on_open_param_settings(self):
-        """操作員按「參數設置」：開啟對話框設定量測參數並暫存序號/操作員"""
-        dlg = SessionStartDialog(parent=self)
-        if dlg.exec_() != SessionStartDialog.Accepted:
+    def _on_open_object_info(self):
+        """操作員按「測試物件」：開啟對話框輸入馬達序號/操作員（供診斷場次記錄）"""
+        dlg = ObjectInfoDialog(
+            parent=self,
+            serial_no=self._param_serial_no,
+            operator=self._param_operator,
+        )
+        if dlg.exec_() != ObjectInfoDialog.Accepted:
             return
 
-        info = dlg.get_session_info()
-
-        # 暫存序號/操作員（供下次診斷場次使用）
+        info = dlg.get_object_info()
         self._param_serial_no = info["serial_no"]
         self._param_operator  = info["operator"]
 
-        # 套用量測參數設定
+        serial_display = f"序號: {self._param_serial_no}" if self._param_serial_no else "序號: (未輸入)"
+        operator_display = f"操作員: {self._param_operator}" if self._param_operator else "操作員: (未輸入)"
+        self._status_bar.showMessage(f"測試物件已設定 | {serial_display} | {operator_display}")
+        print(f"[MainWindow] 測試物件已設定 | {serial_display} | {operator_display}")
 
+    # ─── 參數設置事件 ──────────────────────────────────────────────────────────
+
+    def _apply_measurement_params(self, info: dict, announce: bool = True):
+        """
+        將量測參數套用至 thresholds 字典與各 analyzer / reader。
+
+        供「參數設置」對話框套用與程式啟動載入 active profile 共用。
+
+        Args:
+            info:     量測參數字典（欄位同 MotorProfileManager 的 profile）
+            announce: 是否更新狀態列並輸出 log（啟動時可設 False 靜默套用）
+        """
         # ── Hall 規格 ─────────────────────────────────────────────────────────
         HALL_THRESHOLDS["hall_pulses_per_rev"] = info["hall_pulses_per_rev"]
         HALL_THRESHOLDS["vh_min"] = info["hall_vh_min"]
@@ -897,14 +952,18 @@ class MainWindow(QMainWindow):
         # ── 比值交叉驗證容差 ──────────────────────────────────────────────────
         DIAGNOSTIC["analysis"]["ratio_tolerance"] = info["ratio_tolerance"]
 
+        if not announce:
+            return
+
         # 計算理論比值（供狀態列顯示）
         hall_ppr = info["hall_pulses_per_rev"]
         enc_ppr  = info["ppr"]
         theory_ratio = enc_ppr / hall_ppr if hall_ppr > 0 else 0.0
 
-        serial_display = f"序號: {self._param_serial_no}" if self._param_serial_no else "序號: (未輸入)"
+        profile_name = info.get("profile_name", "")
+        profile_display = f"profile: {profile_name}" if profile_name else "profile: —"
         self._status_bar.showMessage(
-            f"參數已套用 | {serial_display} | "
+            f"參數已套用 | {profile_display} | "
             f"Hall {hall_ppr}週期/轉 | "
             f"Enc PPR={enc_ppr}({info['resolution_bits']}bits) | "
             f"理論比值={theory_ratio:.3f} ±{info['ratio_tolerance']*100:.0f}% | "
@@ -912,10 +971,33 @@ class MainWindow(QMainWindow):
             f"Enc VH≥{info['enc_vh_min']:.2f}V VL≤{info['enc_vl_max']:.2f}V"
         )
         print(
-            f"[MainWindow] 參數設置已套用 | {serial_display} | "
+            f"[MainWindow] 參數設置已套用 | {profile_display} | "
             f"Hall {hall_ppr}週期/轉 | Enc PPR={enc_ppr}({info['resolution_bits']}bits) | "
             f"理論比值={theory_ratio:.3f} ±{info['ratio_tolerance']*100:.0f}%"
         )
+
+    def _load_active_profile(self):
+        """程式啟動時載入 active profile 並靜默套用（不覆寫狀態列訊息）"""
+        try:
+            params = MOTOR_PROFILES.get_active_profile()
+            params["profile_name"] = MOTOR_PROFILES.get_active_name()
+            self._apply_measurement_params(params, announce=False)
+            print(
+                f"[MainWindow] 已載入 active profile: {params['profile_name']} | "
+                f"Hall {params['hall_pulses_per_rev']}週期/轉 | "
+                f"Enc PPR={params['ppr']}({params['resolution_bits']}bits)"
+            )
+        except Exception as e:
+            print(f"[MainWindow] 載入 active profile 失敗（使用預設值）: {e}")
+
+    def _on_open_param_settings(self):
+        """操作員按「參數設置」：開啟對話框設定量測參數（可切換/儲存馬達型號 profile）"""
+        dlg = SessionStartDialog(parent=self)
+        if dlg.exec_() != SessionStartDialog.Accepted:
+            return
+
+        info = dlg.get_session_info()
+        self._apply_measurement_params(info, announce=True)
 
     def _on_open_channel_settings(self):
         """
