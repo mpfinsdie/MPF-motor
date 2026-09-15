@@ -5,9 +5,8 @@
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
 
 from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, SAMPLING
 
@@ -43,12 +42,8 @@ class WaveformWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        # 標題
-        title = QLabel("即時波形監測")
-        title.setFont(QFont("Arial", 11, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("color: #CCCCCC; padding: 4px;")
-        layout.addWidget(title)
+        # 注意：標題「即時波形監測」已移至外層控制列（見 MainWindow._build_monitor_ctrl_bar），
+        # 此處不再重複顯示標題。
 
         # pyqtgraph 圖形視窗
         self._graphics_layout = pg.GraphicsLayoutWidget()

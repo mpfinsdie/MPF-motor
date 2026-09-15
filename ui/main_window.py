@@ -218,14 +218,22 @@ class MainWindow(QMainWindow):
         monitor_layout.setContentsMargins(0, 0, 0, 0)
         monitor_layout.setSpacing(4)
 
-        # ── 波形監測控制列（監控開關 + 清除波形）────────────────────────────
-        monitor_layout.addWidget(self._build_monitor_ctrl_bar())
-
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(4)
 
+        # ── 左側欄：控制列（監控開關 + 清除）＋ 波形圖 ──────────────────────
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
+
+        # 波形監測控制列（置於 WaveformWidget 正上方）
+        left_layout.addWidget(self._build_monitor_ctrl_bar())
+
         self._waveform_widget = WaveformWidget()
-        splitter.addWidget(self._waveform_widget)
+        left_layout.addWidget(self._waveform_widget)
+
+        splitter.addWidget(left_container)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
