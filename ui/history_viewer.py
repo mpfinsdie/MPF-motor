@@ -138,13 +138,10 @@ VIEWER_STYLE = """
 # 欄位定義：(欄位名稱, DB key, 寬度, 對齊)
 COLUMNS = [
     ("ID",        "id",            45,  Qt.AlignCenter),
-    ("類型",       "session_type",  70,  Qt.AlignCenter),
     ("開始時間",   "started_at",   145,  Qt.AlignLeft),
     ("馬達序號",   "serial_no",    140,  Qt.AlignLeft),
     ("操作員",     "operator",      90,  Qt.AlignCenter),
-    ("時長(秒)",   "duration_s",    70,  Qt.AlignCenter),
     ("整體結果",   "overall_pass",  90,  Qt.AlignCenter),
-    ("診斷波形",   "waveform_path", 70,  Qt.AlignCenter),
 ]
 
 
@@ -187,7 +184,7 @@ class HistoryViewer(QDialog):
 
         self._detail_box = self._build_detail_box()
         splitter.addWidget(self._detail_box)
-        splitter.setSizes([420, 160])
+        splitter.setSizes([160, 340])
 
         layout.addWidget(splitter)
 
@@ -260,7 +257,7 @@ class HistoryViewer(QDialog):
         layout = QVBoxLayout(group)
         self._detail_text = QTextEdit()
         self._detail_text.setReadOnly(True)
-        self._detail_text.setMaximumHeight(150)
+        self._detail_text.setMinimumHeight(260)
         self._detail_text.setPlaceholderText("點選上方記錄以查看詳細資訊...")
         layout.addWidget(self._detail_text)
         return group
