@@ -34,8 +34,9 @@
 - PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形（AI 電壓，含閾值線）
-- **即時觀察面板（20 kHz/通道 連續串流）**：顯示各通道即時電壓與 H/L/X 準位（不做 PASS/FAIL 判斷）
-- **🆕 Hall 相序即時判斷（v1.9 新增）**：即時觀察面板底部顯示 Hall 相序方向（✓ CW / ✓ CCW / ✗ Error），依 UVW 二進制狀態跳轉判斷旋轉方向與訊號正確性
+- **即時觀察面板（20 kHz/通道 連續串流）**：判斷一律以 **DI 數位訊號**為準，**AI 類比僅提供波形與電壓數值參考**（不做 H/L/X 準位判斷、不做 PASS/FAIL）
+- **🆕 Hall 相序即時判斷（v1.9 新增）**：即時觀察面板底部顯示 Hall 相序方向（✓ CW / ✓ CCW / ✗ Error），依 **DI** 讀取的 UVW 二進制狀態跳轉判斷旋轉方向與訊號正確性
+- **🆕 Encoder 計數（DI）**：即時觀察的計數／方向／RPM 皆由 **DI** 正交解碼取得，AI 類比僅供波形觀察
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
 - 視窗高度固定 600px，波形圖滾輪縮放僅作用於 X 軸（時間軸）
@@ -388,7 +389,7 @@ MPF-motor/
 │   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式）
 │   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
-│   ├── result_panel.py            # 即時觀察面板（20 kHz/通道 連續串流，僅顯示電壓/準位，無 PASS/FAIL）
+│   ├── result_panel.py            # 即時觀察面板（DI 判斷相序/計數，AI 僅顯示電壓數值，無 PASS/FAIL）
 │   ├── session_dialog.py          # 量測參數設置對話框（含馬達型號 profile 管理）
 │   ├── object_info_dialog.py      # 測試物件資訊對話框（馬達序號 / 操作員）
 │   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
@@ -718,7 +719,7 @@ daq/daq_controller.py   → 模擬 DI 依動態通道產生位元
 
 ### 顯示位置
 
-相序判斷結果顯示於**即時觀察面板 Hall 區塊底部**（獨立於電壓/準位表格），以大字標籤即時更新。此判斷僅供監控觀察，不影響高取樣診斷的 PASS/FAIL。
+相序判斷結果顯示於**即時觀察面板 Hall 區塊底部**（獨立於電壓數值表格），以大字標籤即時更新。相序判斷以 **DI 數位訊號**為依據，AI 類比僅提供波形與電壓數值參考（不做 H/L/X 準位判斷）。此判斷僅供監控觀察，不影響高取樣診斷的 PASS/FAIL。
 
 ### 資料流
 
@@ -762,7 +763,7 @@ USB-4716 硬體 ADC（多通道掃描）
 AIReader._waveform_ai_loop() → getDataF64(chunk×通道數) → reshape 解交錯
   │  各通道存入 deque 滾動緩衝（20,000 點/通道 = 1 秒）
   ↓
-UI callback → 波形顯示（20 Hz 刷新，自動 decimation ≤ 4,000 點）+ 即時觀察面板（電壓/H/L/X 準位）
+UI callback → 波形顯示（20 Hz 刷新，自動 decimation ≤ 4,000 點）+ 即時觀察面板（AI 電壓數值供參考；相序/計數以 DI 為準）
 ```
 
 ### 診斷模式（WaveformAiCtrl 單通道高速串流，v1.5 提升至 200 kS/s）
@@ -935,3 +936,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.8.0** | **2026-09-14** | **硬體通道彈性設定**：Hall U/V/W 與 Encoder A/B 對應的 AI/DI 通道不再寫死，可由使用者自訂；新增 `config/channel_map.json` 設定檔與 `config/channel_config.py`（`CHANNEL_CONFIG` 單例，含 `DEFAULT_CHANNEL_MAP`、`load/save`、`_merge_defaults`、`value_range(kind)`、`diagnostic_channels()` 等查詢方法）；`config/thresholds.py` 改為動態帶入通道並新增 `refresh_channel_map()`；`ai_reader.py`/`di_reader.py` 重構為動態通道並新增 `refresh_channels()` 熱重載（AI 以 min~max 範圍讀取支援非連續通道）；`diagnostic_scanner.py` 改依 `kind`（hall/encoder）判斷量程與模擬相位並向後相容舊通道定義；`daq_controller._simulate_di()` 依動態通道產生位元；新增 `ui/channel_config_dialog.py` 對話框（AI/DI 通道、AI 量程、DI 埠號設定，含重複通道檢查與恢復預設）；主視窗新增「🔌 硬體通道」按鈕，套用後即時 `set_map`/`refresh_channel_map`/`refresh_channels` 熱套用 |
 | **1.9.0** | **2026-09-14** | **Hall 相序即時判斷**：`logic/hall_analyzer.py` 新增 `HallSequenceDetector` 類別，將三相 Hall（U/V/W）狀態編碼為二進制整數（U=bit0、V=bit1、W=bit2），依相鄰狀態跳轉比對 CW（5→1→3→2→6→4）/ CCW（4→6→2→3→1→5）合法轉換表，判斷旋轉方向與訊號正確性；保留最近 6 個不同狀態（一電氣週期），忽略無效狀態（0/7）與未變化狀態，輸出 CW / CCW / Error / ---；`ui/result_panel.py` 的 `HallLivePanel` 底部新增獨立相序標籤（✓ CW 綠 / ✓ CCW 藍 / ✗ Error 紅 / --- 灰），`update_voltages()`、`update_live_voltages()` 新增相序參數；`ui/main_window.py` 於 `_update_analysis()` 補上 `get_hall_states()` 讀取（同時修正 Hall DI 狀態顯示）並整合相序偵測 |
 | **1.10.0** | **2026-09-15** | **即時監控改用 WaveformAI 多通道連續串流（20 kHz/通道）**：`daq/ai_reader.py` 由 `InstantAiCtrl` 逐次輪詢（實際 ~100 Hz）改為 `WaveformAiCtrl` 多通道硬體 DMA 連續串流，每通道真實硬體取樣率提升至 **20,000 Hz**；conversion 以 `channelStart~channelCount` 涵蓋所有 AI 通道（支援非連續通道）、`clockRate` 為每通道取樣率，`getDataF64` 回傳交錯資料後以 numpy `reshape` 解交錯分配各通道 deque；模擬模式改為向量化分段產生（節奏對齊硬體）；`daq/daq_controller.py` 新增監控專用 `create_monitor_wfm_ctrl()`/`release_monitor_wfm_ctrl()`/`get_monitor_wfm_ctrl()`（與診斷 WaveformAiCtrl 分離，進入診斷模式前自動釋放，避免 AI 硬體資源競用）；`config/thresholds.py` 的 `SAMPLING` 更新為 `ai_sample_rate=20_000`、新增 `monitor_chunk_size=2_000`、`section_length=2_000`、`buffer_size=20_000`、`display_max_points=4_000`；`ui/waveform_widget.py` 波形繪製加入自動 decimation（≤ 4,000 點）；UI 標示（監控按鈕 tooltip、狀態列、即時觀察面板標題）同步更新為 20 kHz/通道 連續串流 |
+| **1.11.0** | **2026-09-16** | **即時觀察判斷改以 DI 為準，AI 類比僅供波形/數值參考**：釐清即時觀察職責分工 — Hall 相序判斷（CW/CCW/Error）以 **DI** 讀取的 UVW 狀態為準、Encoder 計數/方向/RPM 由 **DI** 正交解碼取得，AI 類比訊號**僅提供波形圖與電壓數值參考**；`ui/result_panel.py` 的 `HallLivePanel` 與 `EncoderLivePanel` **移除「AI 準位（H/L/X）」欄**（連同 `_level_labels` 建立與判斷邏輯），表頭改為三欄（相別/通道、電壓(V)、DI 狀態），電壓數值改為純參考顯示不套用 PASS/FAIL 色彩；面板底部提示文字更新為「DI 判斷相序 · AI 電壓僅供參考」「DI 判斷計數/RPM · AI 電壓僅供參考」；相序標籤與分隔線 grid 跨欄索引由 4 欄調整為 3 欄。（AI/DI 同時檢測仍由高取樣診斷 `DiagAnalyzer` 完成，不受影響） |

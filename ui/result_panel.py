@@ -78,8 +78,8 @@ class HallLivePanel(QGroupBox):
         grid = QGridLayout(self)
         grid.setSpacing(6)
 
-        # 表頭
-        headers = ["相別", "電壓 (V)", "AI 準位", "DI 狀態"]
+        # 表頭（AI 類比僅顯示電壓數值供參考，判斷以 DI 狀態為準）
+        headers = ["相別", "電壓 (V)", "DI 狀態"]
         for col, h in enumerate(headers):
             lbl = make_label(h)
             lbl.setStyleSheet("color: #888888; font-size: 10px;")
@@ -89,11 +89,10 @@ class HallLivePanel(QGroupBox):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #444444;")
-        grid.addWidget(line, 1, 0, 1, 4)
+        grid.addWidget(line, 1, 0, 1, 3)
 
         # 各相資料列
         self._voltage_labels = {}
-        self._level_labels   = {}
         self._di_labels      = {}
 
         for row, phase in enumerate(self.PHASES, start=2):
@@ -102,26 +101,25 @@ class HallLivePanel(QGroupBox):
             phase_lbl.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 12px;")
             grid.addWidget(phase_lbl, row, 0)
 
+            # 電壓數值（AI 類比僅供參考顯示，不做 H/L/X 準位判斷）
             self._voltage_labels[phase] = make_label("---")
             self._voltage_labels[phase].setStyleSheet(VALUE_STYLE)
             grid.addWidget(self._voltage_labels[phase], row, 1)
 
-            self._level_labels[phase] = make_status_label()
-            grid.addWidget(self._level_labels[phase], row, 2)
-
+            # DI 狀態（相序判斷依據）
             self._di_labels[phase] = make_status_label()
-            grid.addWidget(self._di_labels[phase], row, 3)
+            grid.addWidget(self._di_labels[phase], row, 2)
 
-        # ── 相序判斷（獨立顯示於面板底部）──────────────────────────────────
+        # ── 相序判斷（獨立顯示於面板底部，依 DI 狀態判斷）──────────────────
         seq_row = len(self.PHASES) + 2
         seq_sep = QFrame()
         seq_sep.setFrameShape(QFrame.HLine)
         seq_sep.setStyleSheet("color: #444444;")
-        grid.addWidget(seq_sep, seq_row, 0, 1, 4)
+        grid.addWidget(seq_sep, seq_row, 0, 1, 3)
 
-        seq_title = make_label("相序判斷 (UVW)")
+        seq_title = make_label("相序判斷 (DI)")
         seq_title.setStyleSheet("color: #888888; font-size: 10px;")
-        grid.addWidget(seq_title, seq_row + 1, 0, 1, 2)
+        grid.addWidget(seq_title, seq_row + 1, 0, 1, 1)
 
         self._seq_label = QLabel("---")
         self._seq_label.setAlignment(Qt.AlignCenter)
@@ -129,14 +127,14 @@ class HallLivePanel(QGroupBox):
         self._seq_label.setMinimumWidth(80)
         seq_font = QFont("Arial", 13, QFont.Bold)
         self._seq_label.setFont(seq_font)
-        grid.addWidget(self._seq_label, seq_row + 1, 2, 1, 2)
+        grid.addWidget(self._seq_label, seq_row + 1, 1, 1, 2)
 
-        # 閾值提示
+        # 說明提示（DI 判斷、AI 僅波形/數值參考）
         thresh_lbl = make_label(
-            f"閾值：VH ≥ {self._vh_min}V  VL ≤ {self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
+            "DI 判斷相序 · AI 電壓僅供參考  |  PASS/FAIL 請用「高取樣診斷」"
         )
         thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
-        grid.addWidget(thresh_lbl, seq_row + 2, 0, 1, 4)
+        grid.addWidget(thresh_lbl, seq_row + 2, 0, 1, 3)
 
     def update_voltages(
         self,
@@ -148,26 +146,16 @@ class HallLivePanel(QGroupBox):
         更新即時電壓顯示
 
         Args:
-            hall_voltages: {"U": v, "V": v, "W": v}
-            di_states:     {"U": bool, "V": bool, "W": bool}（可選）
-            seq_result:    相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            hall_voltages: {"U": v, "V": v, "W": v}（AI 類比，僅供參考顯示）
+            di_states:     {"U": bool, "V": bool, "W": bool}（DI 狀態，判斷依據）
+            seq_result:    相序判斷結果（依 DI 判斷）"CW" / "CCW" / "Error" / "---"
         """
         for phase in self.PHASES:
+            # 電壓數值（AI 類比，僅供參考顯示，不做 H/L/X 準位判斷）
             v = hall_voltages.get(phase, 0.0)
             self._voltage_labels[phase].setText(f"{v:.3f} V")
 
-            # AI 準位（僅顯示，不判斷 PASS/FAIL）
-            if v >= self._vh_min:
-                self._level_labels[phase].setText("H")
-                self._level_labels[phase].setStyleSheet(STYLE_HIGH)
-            elif v <= self._vl_max:
-                self._level_labels[phase].setText("L")
-                self._level_labels[phase].setStyleSheet(STYLE_LOW)
-            else:
-                self._level_labels[phase].setText("X")
-                self._level_labels[phase].setStyleSheet(STYLE_UNDEF)
-
-            # DI 狀態（可選）
+            # DI 狀態（相序判斷依據）
             if di_states is not None:
                 di_val = di_states.get(phase, False)
                 self._di_labels[phase].setText("H" if di_val else "L")
@@ -212,7 +200,8 @@ class EncoderLivePanel(QGroupBox):
         grid = QGridLayout()
         grid.setSpacing(6)
 
-        headers = ["通道", "電壓 (V)", "AI 準位", "DI 狀態"]
+        # 表頭（AI 類比僅顯示電壓數值供參考，計數/RPM 以 DI 為準）
+        headers = ["通道", "電壓 (V)", "DI 狀態"]
         for col, h in enumerate(headers):
             lbl = make_label(h)
             lbl.setStyleSheet("color: #888888; font-size: 10px;")
@@ -221,11 +210,10 @@ class EncoderLivePanel(QGroupBox):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setStyleSheet("color: #444444;")
-        grid.addWidget(line, 1, 0, 1, 4)
+        grid.addWidget(line, 1, 0, 1, 3)
 
         CHANNEL_COLORS = {"A": "#FFAA00", "B": "#AA00FF"}
         self._voltage_labels = {}
-        self._level_labels   = {}
         self._di_labels      = {}
 
         for row, ch in enumerate(["A", "B"], start=2):
@@ -234,15 +222,14 @@ class EncoderLivePanel(QGroupBox):
             ch_lbl.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 12px;")
             grid.addWidget(ch_lbl, row, 0)
 
+            # 電壓數值（AI 類比僅供參考顯示，不做 H/L/X 準位判斷）
             self._voltage_labels[ch] = make_label("---")
             self._voltage_labels[ch].setStyleSheet(VALUE_STYLE)
             grid.addWidget(self._voltage_labels[ch], row, 1)
 
-            self._level_labels[ch] = make_status_label()
-            grid.addWidget(self._level_labels[ch], row, 2)
-
+            # DI 狀態（計數/方向/RPM 依據）
             self._di_labels[ch] = make_status_label()
-            grid.addWidget(self._di_labels[ch], row, 3)
+            grid.addWidget(self._di_labels[ch], row, 2)
 
         main_layout.addLayout(grid)
 
@@ -264,9 +251,9 @@ class EncoderLivePanel(QGroupBox):
 
         main_layout.addLayout(info_layout)
 
-        # 閾值提示
+        # 說明提示（DI 判斷計數/RPM、AI 僅波形/數值參考）
         thresh_lbl = make_label(
-            f"閾值：VH ≥ {self._vh_min}V  VL ≤ {self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
+            "DI 判斷計數/RPM · AI 電壓僅供參考  |  PASS/FAIL 請用「高取樣診斷」"
         )
         thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
         main_layout.addWidget(thresh_lbl)
@@ -276,23 +263,16 @@ class EncoderLivePanel(QGroupBox):
         更新即時電壓顯示
 
         Args:
-            enc_voltages: {"A": v, "B": v}
+            enc_voltages: {"A": v, "B": v}（AI 類比，僅供參考顯示）
             enc_state:    {"A": bool, "B": bool, "count": int, "rpm": float, "position_deg": float}
+                          （DI 正交解碼結果，計數/方向/RPM 判斷依據）
         """
         for ch in ["A", "B"]:
+            # 電壓數值（AI 類比，僅供參考顯示，不做 H/L/X 準位判斷）
             v = enc_voltages.get(ch, 0.0)
             self._voltage_labels[ch].setText(f"{v:.3f} V")
 
-            if v >= self._vh_min:
-                self._level_labels[ch].setText("H")
-                self._level_labels[ch].setStyleSheet(STYLE_HIGH)
-            elif v <= self._vl_max:
-                self._level_labels[ch].setText("L")
-                self._level_labels[ch].setStyleSheet(STYLE_LOW)
-            else:
-                self._level_labels[ch].setText("X")
-                self._level_labels[ch].setStyleSheet(STYLE_UNDEF)
-
+            # DI 狀態（計數/方向/RPM 依據）
             if enc_state is not None:
                 di_val = enc_state.get(ch, False)
                 self._di_labels[ch].setText("H" if di_val else "L")
