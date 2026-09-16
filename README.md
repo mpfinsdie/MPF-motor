@@ -35,7 +35,7 @@
 - Hall U/V/W 電壓波形（含閾值線）
 - Encoder A/B 電壓波形（AI 電壓，含閾值線）
 - **即時觀察面板（20 kHz/通道 連續串流）**：判斷一律以 **DI 數位訊號**為準，**AI 類比僅提供波形與電壓數值參考**（不做 H/L/X 準位判斷、不做 PASS/FAIL）
-- **🆕 Hall 相序即時判斷（v1.9 新增）**：即時觀察面板底部顯示 Hall 相序方向（✓ CW / ✓ CCW / ✗ Error），依 **DI** 讀取的 UVW 二進制狀態跳轉判斷旋轉方向與訊號正確性
+- **🆕 Hall 相序即時判斷（v1.9 新增，v1.12 擴充為 AI/DI 雙判斷）**：即時觀察面板底部**並列顯示 AI 與 DI 兩組**相序方向（✓ CW / ✓ CCW / ✗ Error）；**DI 相序**依數位讀取的 UVW 狀態、**AI 相序**依類比電壓經中點閾值編碼後判斷，兩者獨立運作互不干擾
 - **🆕 Encoder 計數（DI）**：即時觀察的計數／方向／RPM 皆由 **DI** 正交解碼取得，AI 類比僅供波形觀察
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
@@ -389,7 +389,7 @@ MPF-motor/
 │   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式）
 │   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
-│   ├── result_panel.py            # 即時觀察面板（DI 判斷相序/計數，AI 僅顯示電壓數值，無 PASS/FAIL）
+│   ├── result_panel.py            # 即時觀察面板（Hall 相序 AI/DI 雙判斷並列顯示、計數以 DI 為準，無 PASS/FAIL）
 │   ├── session_dialog.py          # 量測參數設置對話框（含馬達型號 profile 管理）
 │   ├── object_info_dialog.py      # 測試物件資訊對話框（馬達序號 / 操作員）
 │   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
@@ -719,7 +719,12 @@ daq/daq_controller.py   → 模擬 DI 依動態通道產生位元
 
 ### 顯示位置
 
-相序判斷結果顯示於**即時觀察面板 Hall 區塊底部**（獨立於電壓數值表格），以大字標籤即時更新。相序判斷以 **DI 數位訊號**為依據，AI 類比僅提供波形與電壓數值參考（不做 H/L/X 準位判斷）。此判斷僅供監控觀察，不影響高取樣診斷的 PASS/FAIL。
+相序判斷結果顯示於**即時觀察面板 Hall 區塊底部**（獨立於電壓數值表格），以大字標籤即時更新，並**並列顯示 AI 與 DI 兩組**判斷結果（v1.12）：
+
+- **DI 相序**：以 **DI 數位訊號**讀取的 UVW 狀態直接判斷。
+- **AI 相序**：以 **AI 類比電壓**經中點閾值 `midpoint = (vh_min + vl_max) / 2`（3.3V 系統為 1.4V）編碼為布林（`v ≥ midpoint → H`）後判斷，使用中點門檻可避免電壓落在未定義區導致相序卡住。
+
+AI 與 DI 各自持有獨立的 `HallSequenceDetector` 實例，狀態歷程互不干擾。此判斷僅供監控觀察，不影響高取樣診斷的 PASS/FAIL。
 
 ### 資料流
 
@@ -937,3 +942,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.9.0** | **2026-09-14** | **Hall 相序即時判斷**：`logic/hall_analyzer.py` 新增 `HallSequenceDetector` 類別，將三相 Hall（U/V/W）狀態編碼為二進制整數（U=bit0、V=bit1、W=bit2），依相鄰狀態跳轉比對 CW（5→1→3→2→6→4）/ CCW（4→6→2→3→1→5）合法轉換表，判斷旋轉方向與訊號正確性；保留最近 6 個不同狀態（一電氣週期），忽略無效狀態（0/7）與未變化狀態，輸出 CW / CCW / Error / ---；`ui/result_panel.py` 的 `HallLivePanel` 底部新增獨立相序標籤（✓ CW 綠 / ✓ CCW 藍 / ✗ Error 紅 / --- 灰），`update_voltages()`、`update_live_voltages()` 新增相序參數；`ui/main_window.py` 於 `_update_analysis()` 補上 `get_hall_states()` 讀取（同時修正 Hall DI 狀態顯示）並整合相序偵測 |
 | **1.10.0** | **2026-09-15** | **即時監控改用 WaveformAI 多通道連續串流（20 kHz/通道）**：`daq/ai_reader.py` 由 `InstantAiCtrl` 逐次輪詢（實際 ~100 Hz）改為 `WaveformAiCtrl` 多通道硬體 DMA 連續串流，每通道真實硬體取樣率提升至 **20,000 Hz**；conversion 以 `channelStart~channelCount` 涵蓋所有 AI 通道（支援非連續通道）、`clockRate` 為每通道取樣率，`getDataF64` 回傳交錯資料後以 numpy `reshape` 解交錯分配各通道 deque；模擬模式改為向量化分段產生（節奏對齊硬體）；`daq/daq_controller.py` 新增監控專用 `create_monitor_wfm_ctrl()`/`release_monitor_wfm_ctrl()`/`get_monitor_wfm_ctrl()`（與診斷 WaveformAiCtrl 分離，進入診斷模式前自動釋放，避免 AI 硬體資源競用）；`config/thresholds.py` 的 `SAMPLING` 更新為 `ai_sample_rate=20_000`、新增 `monitor_chunk_size=2_000`、`section_length=2_000`、`buffer_size=20_000`、`display_max_points=4_000`；`ui/waveform_widget.py` 波形繪製加入自動 decimation（≤ 4,000 點）；UI 標示（監控按鈕 tooltip、狀態列、即時觀察面板標題）同步更新為 20 kHz/通道 連續串流 |
 | **1.11.0** | **2026-09-16** | **即時觀察判斷改以 DI 為準，AI 類比僅供波形/數值參考**：釐清即時觀察職責分工 — Hall 相序判斷（CW/CCW/Error）以 **DI** 讀取的 UVW 狀態為準、Encoder 計數/方向/RPM 由 **DI** 正交解碼取得，AI 類比訊號**僅提供波形圖與電壓數值參考**；`ui/result_panel.py` 的 `HallLivePanel` 與 `EncoderLivePanel` **移除「AI 準位（H/L/X）」欄**（連同 `_level_labels` 建立與判斷邏輯），表頭改為三欄（相別/通道、電壓(V)、DI 狀態），電壓數值改為純參考顯示不套用 PASS/FAIL 色彩；面板底部提示文字更新為「DI 判斷相序 · AI 電壓僅供參考」「DI 判斷計數/RPM · AI 電壓僅供參考」；相序標籤與分隔線 grid 跨欄索引由 4 欄調整為 3 欄。（AI/DI 同時檢測仍由高取樣診斷 `DiagAnalyzer` 完成，不受影響） |
+| **1.12.0** | **2026-09-16** | **Hall 相序即時判斷擴充為 AI/DI 雙獨立判斷**：即時觀察面板同時以 **AI 類比** 與 **DI 數位** 讀取的 UVW 狀態各自判斷 CW/CCW/Error，兩者獨立運作。`logic/hall_analyzer.py` 的 `HallSequenceDetector` 新增靜態方法 `encode_from_voltages()`，將三相 Hall AI 電壓依中點閾值 `midpoint=(vh_min+vl_max)/2`（3.3V 系統為 1.4V）編碼為布林（`v≥midpoint→H`），避免落在未定義區導致相序卡住；`ui/main_window.py` 將 `_hall_seq_detector` 拆分為 `_hall_seq_detector_di` 與 `_hall_seq_detector_ai` 兩個獨立實例，`_update_analysis()` 分別計算 DI 相序（`hall_di`）與 AI 相序（`hall_voltages` 經閾值編碼），兩組結果一併傳入面板；`ui/result_panel.py` 的 `HallLivePanel` 底部改為**並列顯示 AI/DI 兩個相序標籤**（新增 `_seq_label_ai`、`_seq_label_di` 與共用 `_apply_seq_style()`），`update_voltages()`／`update_live_voltages()` 新增 `seq_result_ai`／`hall_seq_ai` 參數。（此為監控觀察用途，不影響高取樣診斷 PASS/FAIL） |

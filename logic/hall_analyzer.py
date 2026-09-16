@@ -46,6 +46,36 @@ class HallSequenceDetector:
         """UVW → 二進制整數（U=bit0, V=bit1, W=bit2）"""
         return int(u) | (int(v) << 1) | (int(w) << 2)
 
+    @staticmethod
+    def encode_from_voltages(
+        vu: float,
+        vv: float,
+        vw: float,
+        vh_min: float = None,
+        vl_max: float = None,
+    ):
+        """
+        將三相 Hall AI 類比電壓依中點閾值轉為布林狀態（供 AI 相序判斷使用）
+
+        以中點閾值 midpoint = (vh_min + vl_max) / 2 作為 H/L 分界，
+        v >= midpoint 判為 H（True），否則為 L（False）。
+        使用中點（而非 vh_min / vl_max 雙門檻）可避免電壓落在未定義區
+        （vl_max < v < vh_min）時無法判斷、導致相序卡住的問題。
+
+        Args:
+            vu, vv, vw: 三相 Hall AI 類比電壓（V）
+            vh_min:     H 準位下限（預設取 HALL_THRESHOLDS["vh_min"]）
+            vl_max:     L 準位上限（預設取 HALL_THRESHOLDS["vl_max"]）
+        Returns:
+            tuple[bool, bool, bool]: (U, V, W) 布林狀態
+        """
+        if vh_min is None:
+            vh_min = HALL_THRESHOLDS["vh_min"]
+        if vl_max is None:
+            vl_max = HALL_THRESHOLDS["vl_max"]
+        midpoint = (vh_min + vl_max) / 2.0
+        return (vu >= midpoint, vv >= midpoint, vw >= midpoint)
+
     def update(self, u: bool, v: bool, w: bool) -> str:
         """
         以最新三相 Hall DI 狀態更新偵測器並回傳目前相序判斷結果

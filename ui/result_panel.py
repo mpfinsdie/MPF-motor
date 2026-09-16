@@ -110,52 +110,89 @@ class HallLivePanel(QGroupBox):
             self._di_labels[phase] = make_status_label()
             grid.addWidget(self._di_labels[phase], row, 2)
 
-        # ── 相序判斷（獨立顯示於面板底部，依 DI 狀態判斷）──────────────────
+        # ── 相序判斷（獨立顯示於面板底部，AI 與 DI 各自獨立判斷）──────────
         seq_row = len(self.PHASES) + 2
         seq_sep = QFrame()
         seq_sep.setFrameShape(QFrame.HLine)
         seq_sep.setStyleSheet("color: #444444;")
         grid.addWidget(seq_sep, seq_row, 0, 1, 3)
 
-        seq_title = make_label("相序判斷 (DI)")
-        seq_title.setStyleSheet("color: #888888; font-size: 10px;")
-        grid.addWidget(seq_title, seq_row + 1, 0, 1, 1)
+        # 相序小標題：欄1=標題、欄1(AI) / 欄2(DI) 並列顯示
+        seq_hdr = make_label("相序判斷")
+        seq_hdr.setStyleSheet("color: #888888; font-size: 10px;")
+        grid.addWidget(seq_hdr, seq_row + 1, 0, 1, 1)
 
-        self._seq_label = QLabel("---")
-        self._seq_label.setAlignment(Qt.AlignCenter)
-        self._seq_label.setStyleSheet(STYLE_UNKNOWN)
-        self._seq_label.setMinimumWidth(80)
+        ai_hdr = make_label("AI 類比")
+        ai_hdr.setStyleSheet("color: #888888; font-size: 10px;")
+        grid.addWidget(ai_hdr, seq_row + 1, 1)
+
+        di_hdr = make_label("DI 數位")
+        di_hdr.setStyleSheet("color: #888888; font-size: 10px;")
+        grid.addWidget(di_hdr, seq_row + 1, 2)
+
         seq_font = QFont("Arial", 13, QFont.Bold)
-        self._seq_label.setFont(seq_font)
-        grid.addWidget(self._seq_label, seq_row + 1, 1, 1, 2)
 
-        # 說明提示（DI 判斷、AI 僅波形/數值參考）
+        # AI 相序標籤（依 AI 類比電壓經中點閾值編碼判斷）
+        self._seq_label_ai = QLabel("---")
+        self._seq_label_ai.setAlignment(Qt.AlignCenter)
+        self._seq_label_ai.setStyleSheet(STYLE_UNKNOWN)
+        self._seq_label_ai.setMinimumWidth(70)
+        self._seq_label_ai.setFont(seq_font)
+        grid.addWidget(self._seq_label_ai, seq_row + 2, 1)
+
+        # DI 相序標籤（依 DI 數位狀態判斷）
+        self._seq_label_di = QLabel("---")
+        self._seq_label_di.setAlignment(Qt.AlignCenter)
+        self._seq_label_di.setStyleSheet(STYLE_UNKNOWN)
+        self._seq_label_di.setMinimumWidth(70)
+        self._seq_label_di.setFont(seq_font)
+        grid.addWidget(self._seq_label_di, seq_row + 2, 2)
+
+        # 說明提示（AI / DI 雙相序獨立判斷，AI 電壓仍供波形/數值參考）
         thresh_lbl = make_label(
-            "DI 判斷相序 · AI 電壓僅供參考  |  PASS/FAIL 請用「高取樣診斷」"
+            "AI/DI 各自獨立判斷相序  |  PASS/FAIL 請用「高取樣診斷」"
         )
         thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
-        grid.addWidget(thresh_lbl, seq_row + 2, 0, 1, 3)
+        grid.addWidget(thresh_lbl, seq_row + 3, 0, 1, 3)
+
+    @staticmethod
+    def _apply_seq_style(label, seq_result: str):
+        """依相序判斷結果套用文字與樣式（CW/CCW/Error/---）"""
+        if seq_result == "CW":
+            label.setText("✓ CW")
+            label.setStyleSheet(STYLE_PASS)
+        elif seq_result == "CCW":
+            label.setText("✓ CCW")
+            label.setStyleSheet(STYLE_HIGH)
+        elif seq_result == "Error":
+            label.setText("✗ Error")
+            label.setStyleSheet(STYLE_FAIL)
+        else:
+            label.setText("---")
+            label.setStyleSheet(STYLE_UNKNOWN)
 
     def update_voltages(
         self,
         hall_voltages: dict,
         di_states: dict = None,
-        seq_result: str = "---"
+        seq_result: str = "---",
+        seq_result_ai: str = "---"
     ):
         """
         更新即時電壓顯示
 
         Args:
-            hall_voltages: {"U": v, "V": v, "W": v}（AI 類比，僅供參考顯示）
-            di_states:     {"U": bool, "V": bool, "W": bool}（DI 狀態，判斷依據）
-            seq_result:    相序判斷結果（依 DI 判斷）"CW" / "CCW" / "Error" / "---"
+            hall_voltages: {"U": v, "V": v, "W": v}（AI 類比，同時供顯示與 AI 相序判斷）
+            di_states:     {"U": bool, "V": bool, "W": bool}（DI 狀態，DI 相序判斷依據）
+            seq_result:    DI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            seq_result_ai: AI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
         """
         for phase in self.PHASES:
-            # 電壓數值（AI 類比，僅供參考顯示，不做 H/L/X 準位判斷）
+            # 電壓數值（AI 類比，供參考顯示，同時作為 AI 相序判斷來源）
             v = hall_voltages.get(phase, 0.0)
             self._voltage_labels[phase].setText(f"{v:.3f} V")
 
-            # DI 狀態（相序判斷依據）
+            # DI 狀態（DI 相序判斷依據）
             if di_states is not None:
                 di_val = di_states.get(phase, False)
                 self._di_labels[phase].setText("H" if di_val else "L")
@@ -164,19 +201,9 @@ class HallLivePanel(QGroupBox):
                 self._di_labels[phase].setText("---")
                 self._di_labels[phase].setStyleSheet(STYLE_UNKNOWN)
 
-        # ── 相序判斷結果顯示 ──────────────────────────────────────────────
-        if seq_result == "CW":
-            self._seq_label.setText("✓ CW")
-            self._seq_label.setStyleSheet(STYLE_PASS)
-        elif seq_result == "CCW":
-            self._seq_label.setText("✓ CCW")
-            self._seq_label.setStyleSheet(STYLE_HIGH)
-        elif seq_result == "Error":
-            self._seq_label.setText("✗ Error")
-            self._seq_label.setStyleSheet(STYLE_FAIL)
-        else:
-            self._seq_label.setText("---")
-            self._seq_label.setStyleSheet(STYLE_UNKNOWN)
+        # ── 相序判斷結果顯示（AI / DI 各自獨立）──────────────────────────
+        self._apply_seq_style(self._seq_label_ai, seq_result_ai)
+        self._apply_seq_style(self._seq_label_di, seq_result)
 
 
 class EncoderLivePanel(QGroupBox):
@@ -334,7 +361,8 @@ class ResultPanel(QWidget):
         enc_voltages: dict,
         enc_state: dict = None,
         di_states: dict = None,
-        hall_seq: str = "---"
+        hall_seq: str = "---",
+        hall_seq_ai: str = "---"
     ):
         """
         更新即時電壓顯示（由 _update_analysis 每 50ms 呼叫）
@@ -344,7 +372,10 @@ class ResultPanel(QWidget):
             enc_voltages:  {"A": v, "B": v}
             enc_state:     {"A": bool, "B": bool, "count": int, "rpm": float, "position_deg": float}
             di_states:     {"U": bool, "V": bool, "W": bool}（Hall DI 狀態，可選）
-            hall_seq:      Hall 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            hall_seq:      DI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            hall_seq_ai:   AI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
         """
-        self._hall_panel.update_voltages(hall_voltages, di_states, seq_result=hall_seq)
+        self._hall_panel.update_voltages(
+            hall_voltages, di_states, seq_result=hall_seq, seq_result_ai=hall_seq_ai
+        )
         self._enc_panel.update_voltages(enc_voltages, enc_state)
