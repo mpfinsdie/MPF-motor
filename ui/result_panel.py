@@ -144,12 +144,30 @@ class HallLivePanel(QGroupBox):
         self._seq_label_ai.setFont(seq_font)
         grid.addWidget(self._seq_label_ai, seq_row + 1, 2)
 
+        # ── 狀態序列 debug 顯示（最近 8 個有效 Hall 狀態編碼）────────────────
+        # 依 AI 電壓中點閾值編碼 UVW → 1~6（排除無效的 0/7），
+        # 顯示最近 8 個實際發生的狀態轉換，方便觀察相序是否符合合法轉換表：
+        #   CW : 5→1→3→2→6→4→5...   CCW: 4→6→2→3→1→5→4...
+        seq_dbg_hdr = make_label("狀態序列")
+        seq_dbg_hdr.setStyleSheet("color: #888888; font-size: 10px;")
+        grid.addWidget(seq_dbg_hdr, seq_row + 2, 0)
+
+        self._seq_states_label = QLabel("--------")
+        self._seq_states_label.setAlignment(Qt.AlignCenter)
+        self._seq_states_label.setStyleSheet(
+            "color: #FFDD44; background-color: #2A2A2A; border-radius: 4px; "
+            "padding: 2px 8px; font-family: Consolas, monospace; "
+            "font-size: 14px; font-weight: bold; letter-spacing: 2px;"
+        )
+        self._seq_states_label.setMinimumWidth(120)
+        grid.addWidget(self._seq_states_label, seq_row + 2, 1, 1, 2)
+
         # 說明提示（AI 電壓判斷準位與相序）
         thresh_lbl = make_label(
             f"AI 電壓判定準位 H≥{self._vh_min}V L≤{self._vl_max}V  |  PASS/FAIL 請用「高取樣診斷」"
         )
         thresh_lbl.setStyleSheet("color: #666666; font-size: 10px;")
-        grid.addWidget(thresh_lbl, seq_row + 2, 0, 1, 3)
+        grid.addWidget(thresh_lbl, seq_row + 3, 0, 1, 3)
 
     @staticmethod
     def _apply_seq_style(label, seq_result: str):
@@ -180,7 +198,8 @@ class HallLivePanel(QGroupBox):
     def update_voltages(
         self,
         hall_voltages: dict,
-        seq_result_ai: str = "---"
+        seq_result_ai: str = "---",
+        seq_states: str = ""
     ):
         """
         更新即時電壓顯示
@@ -188,6 +207,7 @@ class HallLivePanel(QGroupBox):
         Args:
             hall_voltages: {"U": v, "V": v, "W": v}（AI 類比，供顯示、準位與相序判斷）
             seq_result_ai: AI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            seq_states:    最近 8 個有效 Hall 狀態編碼字串（如 "51326451"），供 debug 觀察
         """
         for phase in self.PHASES:
             # 電壓數值（AI 類比）
@@ -199,6 +219,9 @@ class HallLivePanel(QGroupBox):
 
         # ── 相序判斷結果顯示（依 AI 電壓）────────────────────────────────────
         self._apply_seq_style(self._seq_label_ai, seq_result_ai)
+
+        # ── 狀態序列 debug 顯示（最近 8 個有效狀態編碼）──────────────────────
+        self._seq_states_label.setText(seq_states if seq_states else "--------")
 
 
 class ResultPanel(QWidget):
@@ -240,13 +263,19 @@ class ResultPanel(QWidget):
     def update_live_voltages(
         self,
         hall_voltages: dict,
-        hall_seq_ai: str = "---"
+        hall_seq_ai: str = "---",
+        hall_seq_states: str = ""
     ):
         """
         更新即時電壓顯示（由 _update_analysis 每 50ms 呼叫）
 
         Args:
-            hall_voltages: {"U": v, "V": v, "W": v}（AI 類比）
-            hall_seq_ai:   AI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            hall_voltages:   {"U": v, "V": v, "W": v}（AI 類比）
+            hall_seq_ai:     AI 相序判斷結果 "CW" / "CCW" / "Error" / "---"
+            hall_seq_states: 最近 8 個有效 Hall 狀態編碼字串（如 "51326451"），供 debug 觀察
         """
-        self._hall_panel.update_voltages(hall_voltages, seq_result_ai=hall_seq_ai)
+        self._hall_panel.update_voltages(
+            hall_voltages,
+            seq_result_ai=hall_seq_ai,
+            seq_states=hall_seq_states,
+        )

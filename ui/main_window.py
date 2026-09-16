@@ -1101,23 +1101,77 @@ class MainWindow(QMainWindow):
         注意：即時監控不做 PASS/FAIL 判斷，僅顯示即時 Hall 電壓與由 AI 判定的
         H/L/X 準位供初步觀察。PASS/FAIL 診斷改由高速取樣
         （DiagnosticScanner + DiagAnalyzer）完成。
+
+        相序判斷改良（修正高速/極低速誤判 Error）：
+          舊做法每 50ms 只取一個瞬時快照喂給偵測器，等於用 20Hz 稀疏取樣去
+          追蹤最高可達數百 Hz 的 Hall 電氣週期，狀態會大幅跳躍造成非法轉換
+          （Error），且高速時看似「停住」。
+          新做法改為每次從波形緩衝區取最近一段真實時序樣本（RECENT_N 點，
+          50kHz 下約 20ms），以中點閾值向量化編碼為 UVW 狀態，找出實際發生的
+          狀態轉換點後依序喂給偵測器，能正確反映真實相序。同時收集最近
+          SEQ_DISPLAY_N 個有效狀態（1~6）編碼序列供畫面 debug 顯示。
         """
+        import numpy as np
+
         # ── 即時電壓顯示（不做 PASS/FAIL 判斷）─────────────────────────────
         hall_voltages = self._ai_reader.get_hall_voltages()
 
-        # ── Hall 相序判斷（CW / CCW / Error）— 依 AI 類比電壓判斷 ──────────
-        # 將三相 Hall AI 類比電壓依中點閾值編碼為布林後判斷
-        u_ai, v_ai, w_ai = HallSequenceDetector.encode_from_voltages(
-            hall_voltages.get("U", 0.0),
-            hall_voltages.get("V", 0.0),
-            hall_voltages.get("W", 0.0),
-        )
-        hall_seq_ai = self._hall_seq_detector_ai.update(u_ai, v_ai, w_ai)
+        # 取三相 Hall 波形緩衝區（真實時序樣本）
+        u_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["U"])
+        v_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["V"])
+        w_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["W"])
+
+        RECENT_N = 1000          # 相序判斷取樣點數（50kHz 下約 20ms）
+        DISP_N = 50              # H/L/X 顯示電壓平均點數（去抖動）
+        SEQ_DISPLAY_N = 8        # debug 顯示最近幾個有效狀態編碼
+
+        n = min(RECENT_N, len(u_buf), len(v_buf), len(w_buf))
+
+        hall_seq_ai = "---"
+        hall_seq_states = ""     # debug 狀態序列字串（如 "51326451"）
+
+        if n > 0:
+            midpoint = (HALL_THRESHOLDS["vh_min"] + HALL_THRESHOLDS["vl_max"]) / 2.0
+
+            u_s = np.asarray(u_buf[-n:]) >= midpoint
+            v_s = np.asarray(v_buf[-n:]) >= midpoint
+            w_s = np.asarray(w_buf[-n:]) >= midpoint
+
+            # UVW → 狀態編碼（U=bit0, V=bit1, W=bit2）
+            states = (
+                u_s.astype(np.int8)
+                | (v_s.astype(np.int8) << 1)
+                | (w_s.astype(np.int8) << 2)
+            )
+
+            # 找出狀態轉換點（含第一個）
+            change_idx = np.where(np.diff(states) != 0)[0] + 1
+            idx_list = np.concatenate(([0], change_idx))
+
+            # 重新從最新一段時序資料判斷相序（避免累積舊稀疏快照）
+            self._hall_seq_detector_ai.reset()
+            for i in idx_list:
+                hall_seq_ai = self._hall_seq_detector_ai.update(
+                    bool(u_s[i]), bool(v_s[i]), bool(w_s[i])
+                )
+
+            # 收集最近 SEQ_DISPLAY_N 個有效狀態（1~6，排除無效的 0/7）供 debug
+            seq_states = [int(states[i]) for i in idx_list]
+            valid_states = [s for s in seq_states if s not in (0, 7)]
+            hall_seq_states = "".join(str(s) for s in valid_states[-SEQ_DISPLAY_N:])
+
+            # H/L/X 顯示電壓改用最近 DISP_N 點平均（避免瞬時快照導致顯示靜止）
+            for phase in ("U", "V", "W"):
+                ch = HALL_THRESHOLDS["channels"][phase]
+                buf = self._ai_reader.get_buffer(ch)
+                if len(buf) >= DISP_N:
+                    hall_voltages[phase] = float(np.mean(buf[-DISP_N:]))
 
         # 更新 ResultPanel 即時電壓顯示（H/L/X 準位由 AI 電壓判定）
         self._result_panel.update_live_voltages(
             hall_voltages=hall_voltages,
             hall_seq_ai=hall_seq_ai,
+            hall_seq_states=hall_seq_states,
         )
 
     # ─── 視窗關閉 ──────────────────────────────────────────────────────────────
