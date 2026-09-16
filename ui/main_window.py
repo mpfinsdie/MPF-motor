@@ -155,8 +155,7 @@ class MainWindow(QMainWindow):
         self._ai_reader    = AIReader(self._daq)
         self._di_reader    = DIReader(self._daq)
         self._hall_analyzer = HallAnalyzer()
-        # AI 與 DI 各自獨立的相序偵測器（狀態歷程互不干擾）
-        self._hall_seq_detector_di = HallSequenceDetector()
+        # 即時監控相序偵測器（依 AI 類比電壓判斷；DI 已於監控模式移除）
         self._hall_seq_detector_ai = HallSequenceDetector()
         self._enc_analyzer  = EncoderAnalyzer()
         self._report_gen    = ReportGenerator()
@@ -351,10 +350,6 @@ class MainWindow(QMainWindow):
         self._btn_diag.clicked.connect(self._on_start_diag)
         layout.addWidget(self._btn_diag)
 
-        self._btn_reset_enc = QPushButton("↺ 重置計數")
-        self._btn_reset_enc.clicked.connect(self._on_reset_encoder)
-        layout.addWidget(self._btn_reset_enc)
-
         # self._btn_export = QPushButton("💾 匯出報表")
         # self._btn_export.setObjectName("btn_export")
         # self._btn_export.clicked.connect(self._on_export)
@@ -523,19 +518,17 @@ class MainWindow(QMainWindow):
             self._start_monitoring()
 
     def _start_monitoring(self):
-        """啟動監控模式：持續讀取 AI/DI，顯示即時波形（手動啟動）"""
+        """啟動監控模式：持續讀取 Hall AI 三通道，顯示即時波形（手動啟動）"""
         if self._is_monitoring:
             return
         # 啟動讀取器（若硬體資源尚未就緒可能拋例外，需正確還原狀態）
         try:
             self._ai_reader.start()
-            self._di_reader.start()
         except Exception as e:
             # 啟動失敗 → 還原狀態，避免按鈕顯示「開」但實際無資料
             print(f"[MainWindow] 啟動監控失敗: {e}")
             try:
                 self._ai_reader.stop()
-                self._di_reader.stop()
             except Exception:
                 pass
             self._is_monitoring = False
@@ -565,7 +558,6 @@ class MainWindow(QMainWindow):
         self._is_monitoring = False
         self._update_timer.stop()
         self._ai_reader.stop()
-        self._di_reader.stop()
         # 更新監控按鈕狀態
         self._btn_monitor.setText("📡 監控：關")
         self._btn_monitor.setStyleSheet(BTN_MON_OFF_STYLE)
@@ -669,10 +661,6 @@ class MainWindow(QMainWindow):
             self._ai_reader.clear_buffers()
         except Exception as e:
             print(f"[MainWindow] 清除 AI 緩衝失敗: {e}")
-        try:
-            self._di_reader.clear_buffers()
-        except Exception as e:
-            print(f"[MainWindow] 清除 DI 緩衝失敗: {e}")
         self._status_bar.showMessage("🗑 即時波形與緩衝已清除")
         print("[MainWindow] 即時波形與緩衝已清除")
 
@@ -1033,11 +1021,6 @@ class MainWindow(QMainWindow):
             f"Hall AI={hall_ai} DI={hall_di} | Enc AI={enc_ai} DI={enc_di}"
         )
 
-    def _on_reset_encoder(self):
-        """重置 Encoder 計數器"""
-        self._di_reader.reset_encoder()
-        self._status_bar.showMessage("Encoder 計數器已重置")
-
     def _on_export(self):
         """匯出最近一次場次的原始報表（若有）"""
         if not self._hall_analyzer.get_history() and not self._enc_analyzer.get_history():
@@ -1106,39 +1089,24 @@ class MainWindow(QMainWindow):
 
     def _update_waveforms(self):
         """更新波形顯示（即時監控開啟時才有資料）"""
-        # Hall AI 波形
+        # Hall AI 三通道波形（50 kHz/通道 連續串流）
         u_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["U"])
         v_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["V"])
         w_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["W"])
         self._waveform_widget.update_hall_waveform(u_buf, v_buf, w_buf)
 
-        # Encoder AI + DI 波形
-        a_ai = self._ai_reader.get_buffer(ENCODER_THRESHOLDS["channels"]["A"])
-        b_ai = self._ai_reader.get_buffer(ENCODER_THRESHOLDS["channels"]["B"])
-        a_di = self._di_reader.get_encoder_a_buffer()
-        b_di = self._di_reader.get_encoder_b_buffer()
-        self._waveform_widget.update_encoder_waveform(a_ai, b_ai, a_di, b_di)
-
     def _update_analysis(self):
         """
         更新即時顯示（監控模式）
-        注意：即時監控不做 PASS/FAIL 判斷，僅顯示即時電壓與 DI 狀態供初步觀察。
-        PASS/FAIL 診斷改由高速取樣（DiagnosticScanner + DiagAnalyzer）完成。
+        注意：即時監控不做 PASS/FAIL 判斷，僅顯示即時 Hall 電壓與由 AI 判定的
+        H/L/X 準位供初步觀察。PASS/FAIL 診斷改由高速取樣
+        （DiagnosticScanner + DiagAnalyzer）完成。
         """
         # ── 即時電壓顯示（不做 PASS/FAIL 判斷）─────────────────────────────
         hall_voltages = self._ai_reader.get_hall_voltages()
-        enc_voltages  = self._ai_reader.get_encoder_voltages()
-        enc_state     = self._di_reader.get_encoder_state()
-        hall_di       = self._di_reader.get_hall_states()
 
-        # ── Hall 相序判斷（CW / CCW / Error）— AI 與 DI 各自獨立判斷 ────────
-        # DI 相序：直接使用 DI 數位讀取的三相 Hall 狀態
-        hall_seq_di = self._hall_seq_detector_di.update(
-            hall_di.get("U", False),
-            hall_di.get("V", False),
-            hall_di.get("W", False),
-        )
-        # AI 相序：將三相 Hall AI 類比電壓依中點閾值編碼為布林後判斷
+        # ── Hall 相序判斷（CW / CCW / Error）— 依 AI 類比電壓判斷 ──────────
+        # 將三相 Hall AI 類比電壓依中點閾值編碼為布林後判斷
         u_ai, v_ai, w_ai = HallSequenceDetector.encode_from_voltages(
             hall_voltages.get("U", 0.0),
             hall_voltages.get("V", 0.0),
@@ -1146,13 +1114,9 @@ class MainWindow(QMainWindow):
         )
         hall_seq_ai = self._hall_seq_detector_ai.update(u_ai, v_ai, w_ai)
 
-        # 更新 ResultPanel 即時電壓顯示（不傳入 PASS/FAIL 結果）
+        # 更新 ResultPanel 即時電壓顯示（H/L/X 準位由 AI 電壓判定）
         self._result_panel.update_live_voltages(
             hall_voltages=hall_voltages,
-            enc_voltages=enc_voltages,
-            enc_state=enc_state,
-            di_states=hall_di,
-            hall_seq=hall_seq_di,
             hall_seq_ai=hall_seq_ai,
         )
 

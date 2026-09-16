@@ -8,15 +8,14 @@
 ## 功能特色
 
 ### Hall Sensor (3.3V 系統)
-- AI 通道量測三相 (U/V/W) 電壓準位（監控 WaveformAI 連續串流 20,000 Hz/通道，診斷模式可達 200,000 Hz/通道）
-- DI 通道讀取 H/L 數位狀態
-- AI 與 DI 一致性驗證
+- **即時監控**：AI 通道量測三相 (U/V/W) 電壓準位（WaveformAI 多通道連續串流 **50,000 Hz/通道**），H/L/X 準位由 **AI 類比電壓** 判定（監控模式已移除 DI）
+- **高取樣診斷**：單通道可達 200,000 Hz/通道，並含 AI 與 DI 一致性驗證
 - 電壓閾值判斷：H > 2.0V，L < 0.8V（可調整）
 
 ### Encoder (5V 系統)
-- AI 通道量測 A/B 相電壓準位（監控 WaveformAI 連續串流 20,000 Hz/通道，診斷模式可達 200,000 Hz/通道）
-- DI 通道讀取 H/L 數位狀態
+- **僅高取樣診斷模式使用**：AI 通道量測 A/B 相電壓準位（診斷模式可達 200,000 Hz/通道）、DI 通道讀取 H/L 數位狀態並進行比值交叉驗證
 - 電壓閾值判斷：H > 3.5V，L < 1.5V（可調整）
+- > ℹ️ 即時監控（監控模式）自 v1.13 起**不再顯示 Encoder**，Encoder 相關功能集中於高取樣診斷模式
 - 軟體正交解碼（A/B 相位差 90°）
 - 轉速計算（RPM）
 - 旋轉方向判斷（正轉/反轉/靜止）
@@ -32,15 +31,13 @@
 
 ### GUI 介面
 - PyQt5 + pyqtgraph 即時波形顯示（20 Hz 刷新）
-- Hall U/V/W 電壓波形（含閾值線）
-- Encoder A/B 電壓波形（AI 電壓，含閾值線）
-- **即時觀察面板（20 kHz/通道 連續串流）**：判斷一律以 **DI 數位訊號**為準，**AI 類比僅提供波形與電壓數值參考**（不做 H/L/X 準位判斷、不做 PASS/FAIL）
-- **🆕 Hall 相序即時判斷（v1.9 新增，v1.12 擴充為 AI/DI 雙判斷）**：即時觀察面板底部**並列顯示 AI 與 DI 兩組**相序方向（✓ CW / ✓ CCW / ✗ Error）；**DI 相序**依數位讀取的 UVW 狀態、**AI 相序**依類比電壓經中點閾值編碼後判斷，兩者獨立運作互不干擾
-- **🆕 Encoder 計數（DI）**：即時觀察的計數／方向／RPM 皆由 **DI** 正交解碼取得，AI 類比僅供波形觀察
+- Hall U/V/W 電壓波形（含閾值線，佔滿波形區）
+- **即時觀察面板（50 kHz/通道 連續串流）**：H/L/X 準位與相序判斷**一律以 AI 類比電壓為準**（監控模式已移除 DI 與 Encoder）
+- **🆕 Hall 相序即時判斷（v1.9 新增，v1.13 起僅以 AI 判斷）**：即時觀察面板底部顯示由 **AI 類比電壓** 判斷的相序方向（✓ CW / ✓ CCW / ✗ Error），依中點閾值編碼後判斷
 - **倒數計時列**：顯示剩餘時間與進度條（檢測中）
 - **即時統計面板**：PASS/FAIL 次數、成功率、平均 RPM（檢測中）
 - 視窗高度固定 600px，波形圖滾輪縮放僅作用於 X 軸（時間軸）
-- **監控預設關閉**：連線後不自動啟動 AI/DI 輪詢，需手動按「📡 監控開關」啟動
+- **監控預設關閉**：連線後不自動啟動 AI 串流，需手動按「📡 監控開關」啟動
 
 ### 🔬 高取樣率診斷模式（v1.4 新增，v1.5 提升至 200 kS/s，v1.6 新增波形診斷分析，v1.7 新增比值交叉驗證）
 - **獨立診斷模式**：另加「🔬 高取樣診斷」按鈕啟動（監控模式與診斷模式互斥）
@@ -58,7 +55,7 @@
 - **🆕 馬達規格可設定**：Hall 每轉週期數、Encoder 解析度（bits）、PPR、比值容差均可在「⚙ 參數設置」對話框調整，適應不同馬達規格
 
 ### 測試場次管理（v1.1 新增）
-- 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 20 kHz/通道 即時觀察，確認訊號後再手動觸發檢測
+- 連線後**監控預設關閉**，操作員按「📡 監控開關」手動啟動 50 kHz/通道 即時觀察，確認訊號後再手動觸發檢測
 - 每次檢測前可輸入**馬達序號**、操作員名稱，並設定量測參數（PPR、電壓閾值）
 - 預設 **5 分鐘**計時，可調整（1~60 分鐘），支援提前停止
 - 結果**自動儲存至 SQLite 資料庫**，不需手動操作
@@ -199,7 +196,7 @@ python main.py
   ↓
 自動連線 USB-4716（連線成功後監控預設關閉）
   ↓
-按「📡 監控開關」啟動 20 kHz/通道 即時觀察（可選）
+按「📡 監控開關」啟動 50 kHz/通道 即時觀察（可選）
   ↓
 觀察即時波形，確認訊號穩定
   ↓
@@ -218,12 +215,11 @@ python main.py
 
 | 按鈕 | 說明 |
 |------|------|
-| **📡 監控開關** | 切換即時監控（AI WaveformAI 連續串流 20 kHz/通道 + DI 輪詢）開/關；連線後預設關閉 |
+| **📡 監控開關** | 切換即時監控（Hall AI WaveformAI 連續串流 50 kHz/通道）開/關；連線後預設關閉 |
 | **🏷 測試物件** | 開啟測試物件對話框，輸入馬達序號、操作員（記錄於診斷場次） |
 | **⚙ 參數設置** | 開啟量測參數對話框，設定 Hall/Encoder 規格與電壓閾值；可存成馬達型號 profile 切換套用 |
 | **🔬 高取樣診斷** | 啟動高取樣率診斷模式（暫停監控，逐 CH 200kHz 採樣，完成後自動分析 PASS/FAIL） |
 | **⏹ 結束診斷** | 提早結束診斷，已採資料仍會儲存並分析 |
-| **↺ 重置計數** | 重置 Encoder 計數器 |
 | **💾 匯出報表** | 匯出最近一次場次的原始數據（Excel/CSV） |
 | **📋 歷史記錄** | 開啟歷史查詢視窗，查看所有場次統計（含診斷 PASS/FAIL） |
 | **🔌 硬體通道** | 開啟硬體通道設定對話框，調整 Hall/Encoder 的 AI/DI 通道、AI 量程、DI 埠號，設定後即時套用（診斷中禁用） |
@@ -368,8 +364,8 @@ MPF-motor/
 ├── daq/
 │   ├── __init__.py
 │   ├── daq_controller.py          # USB-4716 裝置控制器（含診斷模式切換）
-│   ├── ai_reader.py               # 類比輸入讀取（WaveformAI 多通道連續串流 20kHz/通道，監控用，預設關閉）
-│   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 軟體計數）
+│   ├── ai_reader.py               # 類比輸入讀取（WaveformAI 多通道連續串流 50kHz/通道，監控用，僅 Hall 三通道，預設關閉）
+│   └── di_reader.py               # 數位輸入讀取（H/L + Encoder 軟體計數，僅高取樣診斷模式使用）
 │
 ├── db/                            # 資料庫模組（v1.1 新增）
 │   ├── __init__.py
@@ -386,10 +382,10 @@ MPF-motor/
 ├── ui/
 │   ├── __init__.py
 │   ├── main_window.py             # PyQt5 主視窗（含診斷模式）
-│   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式）
+│   ├── waveform_widget.py         # pyqtgraph 即時波形元件（監控模式，僅 Hall 三通道）
 │   ├── diagnostic_widget.py       # 高取樣率即時波形元件（v1.4 新增）
 │   ├── diagnostic_replay_dialog.py # 診斷波形回放對話框（v1.4 新增）
-│   ├── result_panel.py            # 即時觀察面板（Hall 相序 AI/DI 雙判斷並列顯示、計數以 DI 為準，無 PASS/FAIL）
+│   ├── result_panel.py            # 即時觀察面板（Hall H/L/X 準位與相序皆由 AI 判定，無 Encoder/DI、無 PASS/FAIL）
 │   ├── session_dialog.py          # 量測參數設置對話框（含馬達型號 profile 管理）
 │   ├── object_info_dialog.py      # 測試物件資訊對話框（馬達序號 / 操作員）
 │   ├── channel_config_dialog.py   # 硬體通道設定對話框（v1.8 新增）
@@ -745,30 +741,30 @@ HallLivePanel 底部相序標籤（即時更新）
 
 ## AI 取樣架構
 
-### 即時監控模式（WaveformAiCtrl 多通道連續串流，v1.9 提升至 20 kHz/通道）
+### 即時監控模式（WaveformAiCtrl 多通道連續串流，v1.13 提升至 50 kHz/通道，僅 Hall 三通道）
 
-即時監控自 v1.9 起改用 `WaveformAiCtrl` **多通道硬體 DMA 連續串流**，每個通道實際以
-**20,000 Hz** 硬體採樣（不再是 `InstantAiCtrl` 逐次輪詢的 ~100 Hz）。
-`config/thresholds.py` 中 `SAMPLING["ai_sample_rate"]` = **20,000 Hz**（每通道真實硬體取樣率）。
+即時監控自 v1.9 起改用 `WaveformAiCtrl` **多通道硬體 DMA 連續串流**；**v1.13 起僅串流
+Hall U/V/W 三個通道，每通道提升至 50,000 Hz**（移除 Encoder 與 DI）。
+`config/thresholds.py` 中 `SAMPLING["ai_sample_rate"]` = **50,000 Hz**（每通道真實硬體取樣率）。
 
 多通道採樣時，`conversion.clockRate` 為**每通道**取樣率，硬體總取樣率 =
-`ai_sample_rate × 通道數`（5 CH × 20 kHz = 100 kS/s），仍在 USB-4716 總頻寬
+`ai_sample_rate × 通道數`（3 CH × 50 kHz = 150 kS/s），仍在 USB-4716 總頻寬
 （`HW_MAX_SAMPLE_RATE` = 200 kS/s）之內。`getDataF64` 取回**交錯（interleaved）**資料，
 背景執行緒依 `channelCount` 解交錯（reshape）後分配至各通道 deque。
 
-> ⚠️ **注意**：監控模式連線後**預設關閉**，需手動按「📡 監控開關」啟動。監控僅用於初步觀察，不做 PASS/FAIL 判斷。
+> ⚠️ **注意**：監控模式連線後**預設關閉**，需手動按「📡 監控開關」啟動。監控僅用於初步觀察，H/L/X 準位與相序皆由 AI 類比電壓判定，不做 PASS/FAIL 判斷。
 
 ```
-USB-4716 硬體 ADC（多通道掃描）
-  │  每通道 20,000 Hz（conversion.clockRate；channelStart~channelCount 涵蓋所有 AI 通道）
+USB-4716 硬體 ADC（Hall 三通道掃描）
+  │  每通道 50,000 Hz（conversion.clockRate；channelStart~channelCount 涵蓋 Hall U/V/W）
   ↓ DMA
-硬體環形緩衝區（sectionLength=2000 × sectionCount=0 無限循環）
-  │  每累積 2,000 點/通道觸發一次讀取（約每 100ms）
+硬體環形緩衝區（sectionLength=5000 × sectionCount=0 無限循環）
+  │  每累積 5,000 點/通道觸發一次讀取（約每 100ms）
   ↓
 AIReader._waveform_ai_loop() → getDataF64(chunk×通道數) → reshape 解交錯
-  │  各通道存入 deque 滾動緩衝（20,000 點/通道 = 1 秒）
+  │  各通道存入 deque 滾動緩衝（50,000 點/通道 = 1 秒）
   ↓
-UI callback → 波形顯示（20 Hz 刷新，自動 decimation ≤ 4,000 點）+ 即時觀察面板（AI 電壓數值供參考；相序/計數以 DI 為準）
+UI callback → 波形顯示（20 Hz 刷新，自動 decimation ≤ 4,000 點）+ 即時觀察面板（H/L/X 準位與相序皆由 AI 類比電壓判定）
 ```
 
 ### 診斷模式（WaveformAiCtrl 單通道高速串流，v1.5 提升至 200 kS/s）
@@ -790,11 +786,11 @@ npz 儲存（每通道 2,000,000 點 ≈ 7.6 MB float32）
 
 ### 效能對比
 
-| 項目 | 即時監控（WaveformAI，v1.9） | 診斷模式（WaveformAI，v1.5） |
+| 項目 | 即時監控（WaveformAI，v1.13） | 診斷模式（WaveformAI，v1.5） |
 |------|----------------------|----------------------|
-| AI 取樣架構 | 硬體 DMA 串流（多通道掃描） | 硬體 DMA 串流（單通道） |
-| 實際 AI 取樣率 | **20,000 Hz/通道** | **200,000 Hz/通道** |
-| 標示取樣率 | **20,000 Hz/通道**（真實硬體） | **200,000 Hz** |
+| AI 取樣架構 | 硬體 DMA 串流（Hall 三通道掃描） | 硬體 DMA 串流（單通道） |
+| 實際 AI 取樣率 | **50,000 Hz/通道** | **200,000 Hz/通道** |
+| 標示取樣率 | **50,000 Hz/通道**（真實硬體） | **200,000 Hz** |
 | 預設啟動 | **關閉**（手動按鈕啟動） | 按「🔬 高取樣診斷」啟動 |
 | PASS/FAIL 判斷 | **無**（僅顯示電壓/準位） | **有**（DiagAnalyzer 分析） |
 | GUI 刷新率 | 20 Hz | **10 Hz（每 0.1s 一段）** |
@@ -807,11 +803,11 @@ npz 儲存（每通道 2,000,000 點 ≈ 7.6 MB float32）
 | 參數 | 值 | 說明 |
 |------|--------|------|
 | `HW_MAX_SAMPLE_RATE` | **200,000 Hz** | 硬體最高取樣率（USB-4716 單通道上限；多通道時為總頻寬共享） |
-| `ai_sample_rate` | **20,000 Hz** | 監控每通道真實硬體取樣率（WaveformAI 多通道連續串流） |
-| `monitor_chunk_size` | **2,000** | 監控串流每通道分段讀取點數（0.1s @ 20kHz，維持 10 Hz 回呼） |
-| `buffer_size` | **20,000** | 監控波形顯示緩衝點數（20kHz × 1s = 20,000 點/通道） |
+| `ai_sample_rate` | **50,000 Hz** | 監控每通道真實硬體取樣率（WaveformAI Hall 三通道連續串流） |
+| `monitor_chunk_size` | **5,000** | 監控串流每通道分段讀取點數（0.1s @ 50kHz，維持 10 Hz 回呼） |
+| `buffer_size` | **50,000** | 監控波形顯示緩衝點數（50kHz × 1s = 50,000 點/通道） |
 | `display_max_points` | **4,000** | 監控繪圖降採樣上限（超過則自動 decimation） |
-| `section_length` | **2,000** | 監控 WaveformAI 每 section 樣本數（與 chunk 對齊）／診斷模式為 20,000 |
+| `section_length` | **5,000** | 監控 WaveformAI 每 section 樣本數（與 chunk 對齊）／診斷模式為 20,000 |
 | `section_count` | **8** | 診斷模式環形緩衝 section 數（總緩衝 0.8s） |
 | `display_update_ms` | 50 ms | GUI 刷新間隔（20 Hz） |
 
@@ -943,3 +939,4 @@ SQLite 資料庫（`data/motor_test.db`）包含兩張資料表：
 | **1.10.0** | **2026-09-15** | **即時監控改用 WaveformAI 多通道連續串流（20 kHz/通道）**：`daq/ai_reader.py` 由 `InstantAiCtrl` 逐次輪詢（實際 ~100 Hz）改為 `WaveformAiCtrl` 多通道硬體 DMA 連續串流，每通道真實硬體取樣率提升至 **20,000 Hz**；conversion 以 `channelStart~channelCount` 涵蓋所有 AI 通道（支援非連續通道）、`clockRate` 為每通道取樣率，`getDataF64` 回傳交錯資料後以 numpy `reshape` 解交錯分配各通道 deque；模擬模式改為向量化分段產生（節奏對齊硬體）；`daq/daq_controller.py` 新增監控專用 `create_monitor_wfm_ctrl()`/`release_monitor_wfm_ctrl()`/`get_monitor_wfm_ctrl()`（與診斷 WaveformAiCtrl 分離，進入診斷模式前自動釋放，避免 AI 硬體資源競用）；`config/thresholds.py` 的 `SAMPLING` 更新為 `ai_sample_rate=20_000`、新增 `monitor_chunk_size=2_000`、`section_length=2_000`、`buffer_size=20_000`、`display_max_points=4_000`；`ui/waveform_widget.py` 波形繪製加入自動 decimation（≤ 4,000 點）；UI 標示（監控按鈕 tooltip、狀態列、即時觀察面板標題）同步更新為 20 kHz/通道 連續串流 |
 | **1.11.0** | **2026-09-16** | **即時觀察判斷改以 DI 為準，AI 類比僅供波形/數值參考**：釐清即時觀察職責分工 — Hall 相序判斷（CW/CCW/Error）以 **DI** 讀取的 UVW 狀態為準、Encoder 計數/方向/RPM 由 **DI** 正交解碼取得，AI 類比訊號**僅提供波形圖與電壓數值參考**；`ui/result_panel.py` 的 `HallLivePanel` 與 `EncoderLivePanel` **移除「AI 準位（H/L/X）」欄**（連同 `_level_labels` 建立與判斷邏輯），表頭改為三欄（相別/通道、電壓(V)、DI 狀態），電壓數值改為純參考顯示不套用 PASS/FAIL 色彩；面板底部提示文字更新為「DI 判斷相序 · AI 電壓僅供參考」「DI 判斷計數/RPM · AI 電壓僅供參考」；相序標籤與分隔線 grid 跨欄索引由 4 欄調整為 3 欄。（AI/DI 同時檢測仍由高取樣診斷 `DiagAnalyzer` 完成，不受影響） |
 | **1.12.0** | **2026-09-16** | **Hall 相序即時判斷擴充為 AI/DI 雙獨立判斷**：即時觀察面板同時以 **AI 類比** 與 **DI 數位** 讀取的 UVW 狀態各自判斷 CW/CCW/Error，兩者獨立運作。`logic/hall_analyzer.py` 的 `HallSequenceDetector` 新增靜態方法 `encode_from_voltages()`，將三相 Hall AI 電壓依中點閾值 `midpoint=(vh_min+vl_max)/2`（3.3V 系統為 1.4V）編碼為布林（`v≥midpoint→H`），避免落在未定義區導致相序卡住；`ui/main_window.py` 將 `_hall_seq_detector` 拆分為 `_hall_seq_detector_di` 與 `_hall_seq_detector_ai` 兩個獨立實例，`_update_analysis()` 分別計算 DI 相序（`hall_di`）與 AI 相序（`hall_voltages` 經閾值編碼），兩組結果一併傳入面板；`ui/result_panel.py` 的 `HallLivePanel` 底部改為**並列顯示 AI/DI 兩個相序標籤**（新增 `_seq_label_ai`、`_seq_label_di` 與共用 `_apply_seq_style()`），`update_voltages()`／`update_live_voltages()` 新增 `seq_result_ai`／`hall_seq_ai` 參數。（此為監控觀察用途，不影響高取樣診斷 PASS/FAIL） |
+| **1.13.0** | **2026-09-16** | **即時監控模式簡化為純 Hall AI（50 kHz/通道）**：即時波型監測（監控模式）**移除 Encoder 與 DI**，僅保留 Hall U/V/W 三通道 AI WaveformAI 連續串流，並將每通道取樣率由 20 kHz 提升至 **50 kHz**（3 CH × 50 kHz = 150 kS/s，仍在 200 kS/s 硬體頻寬內）；H/L/X 準位與相序判斷**改為一律由 AI 類比電壓判定**（依中點閾值編碼）。`config/thresholds.py` 的 `SAMPLING`：`ai_sample_rate` 20k→50k、`buffer_size` 20k→50k、`monitor_chunk_size`／`section_length` 2k→5k（`DIAGNOSTIC` 診斷區塊不動）；`daq/ai_reader.py` 移除 encoder 通道與 `get_encoder_voltages()`、`ENCODER_CHANNELS`，只串流 Hall 三通道；`ui/waveform_widget.py` 移除 Encoder 子圖與 `update_encoder_waveform()`，Hall 波形佔滿版面；`ui/result_panel.py` 的 `HallLivePanel` 準位欄改由 AI 電壓判定 H/L/X、相序只留 AI，並移除 `EncoderLivePanel`；`ui/main_window.py` 移除 DIReader 啟停、encoder 波形/電壓更新、DI 相序偵測器（只留 `_hall_seq_detector_ai`）、「↺ 重置計數」按鈕與 `_on_reset_encoder()`。**高取樣診斷模式維持不變**（仍保留 Encoder 與比值交叉驗證，DIReader 於診斷模式續用） |

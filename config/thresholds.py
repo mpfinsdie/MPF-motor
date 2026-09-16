@@ -54,26 +54,28 @@ AI_RANGE = {
     "encoder": CHANNEL_CONFIG.value_range_name("encoder"),  # 0~10V 單極性（Encoder 5V 訊號）
 }
 
-# ─── 即時監控取樣設定（WaveformAiCtrl 多通道連續串流模式，v1.9）──────────────
-# v1.9 起即時監控改用 WaveformAiCtrl 多通道硬體 DMA 連續串流，
-# 每個通道實際以 ai_sample_rate（20 kHz）硬體取樣，不再是 InstantAiCtrl 逐次輪詢。
+# ─── 即時監控取樣設定（WaveformAiCtrl 多通道連續串流模式）──────────────────────
+# 即時監控使用 WaveformAiCtrl 多通道硬體 DMA 連續串流，
+# 每個通道實際以 ai_sample_rate（50 kHz）硬體取樣，不再是 InstantAiCtrl 逐次輪詢。
 #   硬體 ADC → DMA → 環形緩衝區 → 背景執行緒 getDataF64 → 解交錯分配各通道 → UI 顯示
 # 監控模式預設關閉，需手動按「監控開關」按鈕啟動，僅供初步觀察，不做 PASS/FAIL 判斷。
 #
-# 多通道總取樣率 = ai_sample_rate × 通道數（5 CH × 20kHz = 100 kS/s），
+# 即時監控僅量測三相 Hall（U/V/W），Encoder 與 DI 已於監控模式移除，
+# 多通道總取樣率 = ai_sample_rate × 通道數（3 CH × 50kHz = 150 kS/s），
 # 仍在 USB-4716 硬體總頻寬（HW_MAX_SAMPLE_RATE = 200 kS/s）之內。
+# H/L/X 準位判斷改由 AI 類比電壓直接判定（不再依賴 DI 數位訊號）。
 SAMPLING = {
-    "ai_sample_rate":    20_000,  # 即時監控每通道取樣率 (Hz)，20 kHz（WaveformAiCtrl 硬體連續採樣）
-                                  # 多通道總取樣率 = 20kHz × 通道數，需 ≤ HW_MAX_SAMPLE_RATE
-    "monitor_chunk_size": 2_000,  # 監控串流每通道分段讀取點數
+    "ai_sample_rate":    50_000,  # 即時監控每通道取樣率 (Hz)，50 kHz（WaveformAiCtrl 硬體連續採樣）
+                                  # 多通道總取樣率 = 50kHz × 3 通道 = 150kHz，需 ≤ HW_MAX_SAMPLE_RATE
+    "monitor_chunk_size": 5_000,  # 監控串流每通道分段讀取點數
                                   # DataReady 觸發間隔 = monitor_chunk_size / ai_sample_rate
-                                  # = 2000 / 20000 = 0.1s（維持 10 Hz 回呼頻率，避免 UI 卡頓）
-    "section_length":    2_000,   # WaveformAI 每 section 樣本數（每通道），與 monitor_chunk_size 對齊
+                                  # = 5000 / 50000 = 0.1s（維持 10 Hz 回呼頻率，避免 UI 卡頓）
+    "section_length":    5_000,   # WaveformAI 每 section 樣本數（每通道），與 monitor_chunk_size 對齊
     "section_count":     8,       # WaveformAI 環形緩衝 section 數
-                                  # 總緩衝深度 = 8 × 2000 = 16,000 點/通道（0.8s @ 20kHz）
-    "di_poll_interval":  0.0001,  # DI 輪詢間隔 (秒) = 10 kHz（DI 不受 AI 取樣率影響）
+                                  # 總緩衝深度 = 8 × 5000 = 40,000 點/通道（0.8s @ 50kHz）
+    "di_poll_interval":  0.0001,  # DI 輪詢間隔 (秒) = 10 kHz（保留供診斷模式參考，監控已不使用）
     "display_update_ms": 50,      # GUI 更新間隔 (ms)，20 Hz 刷新
-    "buffer_size":       20_000,  # 波形顯示緩衝點數（20kHz × 1s = 20,000 點/通道）
+    "buffer_size":       50_000,  # 波形顯示緩衝點數（50kHz × 1s = 50,000 點/通道）
     "display_max_points": 4_000,  # 繪圖降採樣上限（超過則 decimation，維持 UI 流暢）
 }
 

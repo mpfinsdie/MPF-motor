@@ -1,24 +1,25 @@
 """
-類比輸入讀取模組（WaveformAiCtrl 多通道連續串流版，v1.9）
+類比輸入讀取模組（WaveformAiCtrl 多通道連續串流版）
 
 架構：
   真實硬體：WaveformAiCtrl 多通道硬體 DMA 連續串流
     conversion.channelStart/channelCount 涵蓋所有使用者 AI 通道（min~max 範圍），
-    conversion.clockRate = ai_sample_rate（每通道 20kHz），
+    conversion.clockRate = ai_sample_rate（每通道 50kHz），
     record.sectionLength = monitor_chunk_size（每通道分段點數），sectionCount = 0（無限循環）。
     背景執行緒每次 getDataF64 取回一段「交錯（interleaved）」資料，
     解交錯後依實際通道編號存入各自 deque 並觸發 UI callback。
 
-  模擬模式：背景執行緒以相同節奏分段產生模擬波形資料（每通道 20kHz）。
+  模擬模式：背景執行緒以相同節奏分段產生模擬波形資料（每通道 50kHz）。
+
+即時監控範圍：
+  即時監控僅量測三相 Hall（U/V/W），Encoder 與 DI 已於監控模式移除。
+  H/L/X 準位判斷改由 AI 類比電壓直接判定（不再依賴 DI 數位訊號）。
+  Encoder 量測與比值交叉驗證仍保留於「高取樣診斷」模式，不受此影響。
 
 通道對應：
   由 config.channel_config.CHANNEL_CONFIG 動態提供，使用者可透過 UI
-  「硬體通道設定」或直接編輯 config/channel_map.json 調整 AI 通道，
-  不再固定為 AI0~4。呼叫 refresh_channels() 可於執行期套用新設定。
-
-效能對比（v1.8 → v1.9）：
-  舊版：InstantAiCtrl 逐次輪詢，實際約 100 Hz（受 OS 排程限制）
-  新版：WaveformAiCtrl 硬體連續串流，每通道實際 20,000 Hz
+  「硬體通道設定」或直接編輯 config/channel_map.json 調整 Hall AI 通道。
+  呼叫 refresh_channels() 可於執行期套用新設定。
 """
 
 import time
@@ -28,7 +29,7 @@ import numpy as np
 from collections import deque
 from typing import Callable, Optional
 
-from config.thresholds import HALL_THRESHOLDS, ENCODER_THRESHOLDS, SAMPLING
+from config.thresholds import HALL_THRESHOLDS, SAMPLING
 from config.channel_config import CHANNEL_CONFIG
 
 
@@ -39,12 +40,13 @@ class AIReader:
     真實硬體模式：
       - 建立監控用 WaveformAiCtrl，設定多通道 conversion 與 record 後啟動硬體串流
       - 背景執行緒分段 getDataF64 取回交錯資料，解交錯分配至各通道 deque
-      - 每個通道實際以 ai_sample_rate（20kHz）硬體採樣
+      - 每個 Hall 通道實際以 ai_sample_rate（50kHz）硬體採樣
 
     模擬模式：
-      - 啟動背景執行緒以相同節奏產生模擬波形資料（每通道 20kHz）
+      - 啟動背景執行緒以相同節奏產生模擬波形資料（每通道 50kHz）
 
-    通道對應由 CHANNEL_CONFIG 動態提供，可用 refresh_channels() 熱更新。
+    僅讀取三相 Hall（U/V/W），通道對應由 CHANNEL_CONFIG 動態提供，
+    可用 refresh_channels() 熱更新。
     """
 
     def __init__(self, daq_controller):
@@ -76,13 +78,13 @@ class AIReader:
         """
         依 CHANNEL_CONFIG 目前設定建立通道清單、緩衝區與讀取範圍。
 
-        通道可能非連續（例如使用者設定 AI0,1,2,5,6），因此以 min~max
-        涵蓋範圍設定 WaveformAiCtrl 的 channelStart/channelCount，
-        取回交錯資料後再依實際通道編號解交錯取值。
+        即時監控僅讀取三相 Hall（U/V/W）。通道可能非連續
+        （例如使用者設定 AI0,1,5），因此以 min~max 涵蓋範圍設定
+        WaveformAiCtrl 的 channelStart/channelCount，取回交錯資料後
+        再依實際通道編號解交錯取值。
         """
         self._hall_chs    = [CHANNEL_CONFIG.hall_ai(s) for s in ("U", "V", "W")]
-        self._encoder_chs = [CHANNEL_CONFIG.encoder_ai(s) for s in ("A", "B")]
-        self._all_chs     = self._hall_chs + self._encoder_chs
+        self._all_chs     = list(self._hall_chs)
 
         # 掃描涵蓋範圍（含中間未使用的通道，硬體連續掃描後再解交錯挑選）
         self._scan_start = min(self._all_chs)
@@ -112,8 +114,7 @@ class AIReader:
         with self._lock:
             self._build_channel_state()
         print(
-            f"[AIReader] 通道設定已更新 | "
-            f"Hall AI={self._hall_chs} | Encoder AI={self._encoder_chs}"
+            f"[AIReader] 通道設定已更新 | Hall AI={self._hall_chs}"
         )
         if was_running:
             self.start()
@@ -122,10 +123,6 @@ class AIReader:
     @property
     def HALL_CHANNELS(self):
         return self._hall_chs
-
-    @property
-    def ENCODER_CHANNELS(self):
-        return self._encoder_chs
 
     @property
     def ALL_CHANNELS(self):
@@ -187,9 +184,6 @@ class AIReader:
             hall_vr = CHANNEL_CONFIG.value_range("hall")
             for ch in self._hall_chs:
                 wfm.channels[ch].valueRange = hall_vr
-            enc_vr = CHANNEL_CONFIG.value_range("encoder")
-            for ch in self._encoder_chs:
-                wfm.channels[ch].valueRange = enc_vr
 
             # ── 設定 conversion（多通道掃描）──────────────────────────────────
             # clockRate 為每通道取樣率；clamp 確保不超過硬體上限
@@ -343,20 +337,13 @@ class AIReader:
         """
         向量化產生一段模擬 AI 電壓（用於無硬體時測試）
 
-        依通道所屬類型（Hall / Encoder）產生對應模擬方波，
-        不再依賴固定通道編號，支援使用者自訂通道。
+        僅模擬三相 Hall 方波，不再依賴固定通道編號，支援使用者自訂通道。
         """
         # Hall 通道：3.3V 方波，三相相差 120 度，基頻 2 Hz
         if channel in self._hall_chs:
             phase_idx = self._hall_chs.index(channel)
             wave = np.sin(2 * math.pi * 2 * t_arr + phase_idx * 2.094)
             return np.where(wave > 0, 3.3, 0.0).astype(np.float32)
-        # Encoder 通道：5V 方波，A/B 相差 90 度，基頻 10 Hz
-        if channel in self._encoder_chs:
-            enc_idx = self._encoder_chs.index(channel)
-            phase = 0.0 if enc_idx == 0 else -math.pi / 2
-            wave = np.sin(2 * math.pi * 10 * t_arr + phase)
-            return np.where(wave > 0, 5.0, 0.0).astype(np.float32)
         return np.zeros(len(t_arr), dtype=np.float32)
 
     def _simulate_ai(self, channel: int, t: float) -> float:
@@ -426,18 +413,6 @@ class AIReader:
                 "U": self._latest.get(CHANNEL_CONFIG.hall_ai("U"), 0.0),
                 "V": self._latest.get(CHANNEL_CONFIG.hall_ai("V"), 0.0),
                 "W": self._latest.get(CHANNEL_CONFIG.hall_ai("W"), 0.0),
-            }
-
-    def get_encoder_voltages(self) -> dict:
-        """
-        取得 Encoder A/B 最新電壓
-        Returns:
-            dict: {"A": v, "B": v}
-        """
-        with self._lock:
-            return {
-                "A": self._latest.get(CHANNEL_CONFIG.encoder_ai("A"), 0.0),
-                "B": self._latest.get(CHANNEL_CONFIG.encoder_ai("B"), 0.0),
             }
 
     def read_snapshot(self, num_samples: int = 100) -> dict:
