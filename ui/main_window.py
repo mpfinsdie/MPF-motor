@@ -19,7 +19,6 @@
 
 import time
 import os
-from collections import deque
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -157,11 +156,8 @@ class MainWindow(QMainWindow):
         self._di_reader    = DIReader(self._daq)
         self._hall_analyzer = HallAnalyzer()
         # 即時監控相序偵測器（依 AI 類比電壓判斷；DI 已於監控模式移除）
+        # 注意：每次 _update_analysis 皆從連續窗口重算，故不需跨幀持久化狀態
         self._hall_seq_detector_ai = HallSequenceDetector()
-        # 持久化狀態序列歷史（跨幀累積，供 debug 顯示最近 N 個有效 Hall 狀態編碼）
-        # 每次僅在偵測到「新的」狀態轉換時 append，低速無轉換時仍保留舊序列不清空
-        self._hall_state_history: deque = deque(maxlen=16)
-        self._hall_last_seq_state: int = -1   # 上次累積的最後狀態（跨幀去重用）
         self._enc_analyzer  = EncoderAnalyzer()
         self._report_gen    = ReportGenerator()
 
@@ -526,9 +522,6 @@ class MainWindow(QMainWindow):
         """啟動監控模式：持續讀取 Hall AI 三通道，顯示即時波形（手動啟動）"""
         if self._is_monitoring:
             return
-        # 重置狀態序列 debug 歷史（新一次監控從乾淨序列開始累積）
-        self._hall_state_history.clear()
-        self._hall_last_seq_state = -1
         # 啟動讀取器（若硬體資源尚未就緒可能拋例外，需正確還原狀態）
         try:
             self._ai_reader.start()
@@ -669,9 +662,6 @@ class MainWindow(QMainWindow):
             self._ai_reader.clear_buffers()
         except Exception as e:
             print(f"[MainWindow] 清除 AI 緩衝失敗: {e}")
-        # 一併清除狀態序列 debug 歷史（避免顯示已清除波形前的舊序列）
-        self._hall_state_history.clear()
-        self._hall_last_seq_state = -1
         self._status_bar.showMessage("🗑 即時波形與緩衝已清除")
         print("[MainWindow] 即時波形與緩衝已清除")
 
@@ -1113,21 +1103,22 @@ class MainWindow(QMainWindow):
         H/L/X 準位供初步觀察。PASS/FAIL 診斷改由高速取樣
         （DiagnosticScanner + DiagAnalyzer）完成。
 
-        相序判斷改良（修正高速/極低速誤判 Error）：
-          舊做法每 50ms 只取一個瞬時快照喂給偵測器，等於用 20Hz 稀疏取樣去
-          追蹤最高可達數百 Hz 的 Hall 電氣週期，狀態會大幅跳躍造成非法轉換
-          （Error），且高速時看似「停住」。
-          新做法改為每次從波形緩衝區取最近一段真實時序樣本（RECENT_N 點，
-          50kHz 下約 20ms），以中點閾值向量化編碼為 UVW 狀態，找出實際發生的
-          狀態轉換點後依序喂給偵測器，能正確反映真實相序。
+        相序判斷與狀態序列 debug（單一連續窗口 + run-length 毛刺濾除）：
+          問題根源：
+            舊做法一次只取 20ms（RECENT_N=1000）窗口，卻每 50ms 更新一次，
+            兩幀之間存在 30ms 資料空隙。跨幀以持久化 deque 累積狀態時，會把
+            「非相鄰」的狀態接在一起，產生像 15432315 的非法轉換（4→3 不在
+            CW/CCW 表內）；同時相序判斷用「每幀重置的偵測器」只看 20ms 局部
+            窗口，與 debug 序列的資料源不同，導致兩者不一致、且低速大多 ---。
 
-        狀態序列 debug 顯示（跨幀持久累積）：
-          RECENT_N 窗口（20ms）小於 GUI 更新間隔（50ms），兩幀資料不重疊，
-          低速時單一窗口內可能完全沒有狀態轉換。若每幀重算局部序列，畫面會
-          頻繁被清空（顯示 "--------"）而無法觀看完整序列。
-          因此改用持久化 deque（self._hall_state_history）跨幀累積，只在偵測到
-          「與上次累積的最後狀態不同」的新狀態時才 append（跨幀去重），
-          低速或無轉換時序列保持不變，畫面不再被清空。
+          解法：
+            1) 改用「單一連續窗口」WINDOW_N（50kHz 下 0.5s），遠大於 50ms
+               更新間隔 → 相鄰幀高度重疊、無資料空隙，不會把非相鄰狀態誤接。
+            2) 對窗口內樣本以中點閾值向量化編碼為 UVW 狀態，做 run-length 編碼
+               後濾除「過短區段（毛刺，< MIN_RUN 點）」與無效狀態（0/7 三相
+               全同），再合併濾除後相鄰重複，得到一份「乾淨狀態序列」。
+            3) 相序判斷與 debug 序列「共用這份乾淨序列」→ 兩者必然一致，
+               且窗口夠長，低速也能取得 ≥2 次轉換而正確判定 CW/CCW。
         """
         import numpy as np
 
@@ -1139,13 +1130,15 @@ class MainWindow(QMainWindow):
         v_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["V"])
         w_buf = self._ai_reader.get_buffer(HALL_THRESHOLDS["channels"]["W"])
 
-        RECENT_N = 1000          # 相序判斷取樣點數（50kHz 下約 20ms）
+        WINDOW_N = 25000         # 連續分析窗口點數（50kHz 下 0.5s，遠大於 50ms 更新間隔 → 幀間重疊無空隙）
+        MIN_RUN = 5              # 毛刺濾除：run-length 小於此點數的狀態視為雜訊丟棄（0.1ms）
         DISP_N = 50              # H/L/X 顯示電壓平均點數（去抖動）
         SEQ_DISPLAY_N = 8        # debug 顯示最近幾個有效狀態編碼
 
-        n = min(RECENT_N, len(u_buf), len(v_buf), len(w_buf))
+        n = min(WINDOW_N, len(u_buf), len(v_buf), len(w_buf))
 
         hall_seq_ai = "---"
+        hall_seq_states = ""
 
         if n > 0:
             midpoint = (HALL_THRESHOLDS["vh_min"] + HALL_THRESHOLDS["vl_max"]) / 2.0
@@ -1159,31 +1152,38 @@ class MainWindow(QMainWindow):
                 u_s.astype(np.int8)
                 | (v_s.astype(np.int8) << 1)
                 | (w_s.astype(np.int8) << 2)
-            )
+            ).astype(np.int8)
 
-            # 找出狀態轉換點（含第一個）
-            change_idx = np.where(np.diff(states) != 0)[0] + 1
-            idx_list = np.concatenate(([0], change_idx))
+            # ── run-length 編碼：切出連續相同狀態的區段 ────────────────────
+            boundaries = np.concatenate((
+                [0],
+                np.where(np.diff(states) != 0)[0] + 1,
+            ))
+            run_vals = states[boundaries]                         # 各區段狀態值
+            run_ends = np.concatenate((boundaries[1:], [n]))
+            run_lens = run_ends - boundaries                      # 各區段持續點數
 
-            # 重新從最新一段時序資料判斷相序（避免累積舊稀疏快照）
+            # ── 毛刺 / 無效狀態濾除 ────────────────────────────────────────
+            # 丟棄過短區段（雜訊尖波）與 0/7（三相全同）無效狀態。
+            keep = (run_lens >= MIN_RUN) & (run_vals != 0) & (run_vals != 7)
+            clean = run_vals[keep]
+
+            # 濾除中間毛刺後可能露出相鄰重複（如 5,[毛刺],5）→ 再合併相鄰重複
+            if clean.size > 0:
+                collapse = np.concatenate(([True], clean[1:] != clean[:-1]))
+                clean = clean[collapse]
+
+            # ── 相序判斷與 debug 序列共用同一份乾淨狀態序列（確保一致）──────
             self._hall_seq_detector_ai.reset()
-            for i in idx_list:
+            for s in clean.tolist():
                 hall_seq_ai = self._hall_seq_detector_ai.update(
-                    bool(u_s[i]), bool(v_s[i]), bool(w_s[i])
+                    bool(s & 0b001), bool(s & 0b010), bool(s & 0b100)
                 )
 
-            # ── 狀態序列跨幀累積（含跨幀去重）──────────────────────────────
-            # 只把本窗口內「新出現」的有效狀態（1~6）append 到持久化歷史。
-            # 跨幀去重：與上次累積的最後狀態相同者略過，避免同一狀態被重複記錄
-            # （例如相鄰兩幀窗口都以同一狀態結尾/開頭）。
-            for i in idx_list:
-                s = int(states[i])
-                if s in (0, 7):          # 無效狀態（三相全同）忽略
-                    continue
-                if s == self._hall_last_seq_state:  # 與上次累積相同 → 去重
-                    continue
-                self._hall_state_history.append(s)
-                self._hall_last_seq_state = s
+            # debug 狀態序列字串（如 "51326451"）— 取乾淨序列最近 SEQ_DISPLAY_N 個
+            hall_seq_states = "".join(
+                str(int(s)) for s in clean[-SEQ_DISPLAY_N:].tolist()
+            )
 
             # H/L/X 顯示電壓改用最近 DISP_N 點平均（避免瞬時快照導致顯示靜止）
             for phase in ("U", "V", "W"):
@@ -1191,12 +1191,6 @@ class MainWindow(QMainWindow):
                 buf = self._ai_reader.get_buffer(ch)
                 if len(buf) >= DISP_N:
                     hall_voltages[phase] = float(np.mean(buf[-DISP_N:]))
-
-        # debug 狀態序列字串（如 "51326451"）— 取持久化歷史最近 SEQ_DISPLAY_N 個
-        # 跨幀保留，低速或本幀無新轉換時仍顯示先前累積的序列，不會被清空
-        hall_seq_states = "".join(
-            str(s) for s in list(self._hall_state_history)[-SEQ_DISPLAY_N:]
-        )
 
         # 更新 ResultPanel 即時電壓顯示（H/L/X 準位由 AI 電壓判定）
         self._result_panel.update_live_voltages(
